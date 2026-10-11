@@ -25,7 +25,7 @@ from typing import List, Dict, Any, Optional
 AI_TAG_REGEX = re.compile(r'#ai(?:\/[a-zA-Z0-9_\-]+)?\b', re.IGNORECASE)
 CHECKBOX_REGEX = re.compile(r'^(\s*)- \[[ \t]\]\s+(.*)$')
 DOSSIER_LINK_REGEX = re.compile(r'\[\[(Brain_Operations/Dossiers/[^\]|]+)(?:\|[^\]]+)?\]\]', re.IGNORECASE)
-AI_UPDATE_BULLET_REGEX = re.compile(r'^\s*[-*]\s*\*\*(?:AI Update|Latest Update|Question for Peter)\b.*?\*\*', re.IGNORECASE)
+AI_UPDATE_BULLET_REGEX = re.compile(r'^\s*[-*]\s*\*\*(?:AI Update|Latest Update|Question for\b[^\n*]*)\b.*?\*\*', re.IGNORECASE)
 
 DEFAULT_EXCLUDES = {'.obsidian', '.git', '.trash', 'Brain_Operations', 'node_modules', '.agents'}
 
@@ -203,7 +203,7 @@ def append_progress_to_note(vault_path: Path, rel_file: str, line_number: int,
     new_bullets = []
     new_bullets.append(f"{sub_indent}- **Latest Update ({today})**: {summary_text}\n")
     if question_text:
-        new_bullets.append(f"{sub_indent}- **Question for Peter**: {question_text}\n")
+        new_bullets.append(f"{sub_indent}- **Question for the user**: {question_text}\n")
 
     # Insert bullets directly after task line
     insert_pos = idx + 1
@@ -234,7 +234,7 @@ def main():
     update_parser.add_argument("--new-tag", default=None, help="New tag (e.g., #ai/in-progress, #ai/done)")
     update_parser.add_argument("--summary", required=True, help="Consolidated latest status summary")
     update_parser.add_argument("--dossier", default=None, help="Relative path to living dossier (without dates in filename)")
-    update_parser.add_argument("--question", default=None, help="Optional active question for Peter")
+    update_parser.add_argument("--question", default=None, help="Optional active question for the user")
 
     args = parser.parse_args()
     vault_path = Path(args.vault).resolve()
