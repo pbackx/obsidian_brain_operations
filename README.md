@@ -210,40 +210,38 @@ Tasks are controlled using standard markdown checkboxes and `#ai` tags:
 ```
                   +----------------------------------------------+
                   |              New / Backlog                   |
-                  |     `- [ ] Task #ai` or `#ai/todo`           |
+                  |     `- [ ] Task #ai` or `#ai/focus`          |
                   +----------------------+-----------------------+
                                          |
                                 (Nightly Agent Triage)
                                          |
                                          v
-                  +----------------------------------------------+
-                  |         Active Processing / Multi-step       |
-                  | `- [ ] Task #ai/in-progress [[Dossier|📄]]`  |
-                  +-----------+----------------------+-----------+
-                              |                      |
-             (Goal accomplished)        (Needs user guidance)
-                              |                      |
-                              v                      v
-        +---------------------------+  +-------------------------------+
-        |         Completed         |  |       Blocked on User         |
-        | `- [x] Task #ai/done`     |  |    `- [ ] Task #ai/question`  |
-        +---------------------------+  +---------------+---------------+
-                                                       |
-                                            (User adds reply bullet
-                                             or changes back to `#ai`)
-                                                       |
-                                                       v
-                                            (Resumes in queue)
+                         (Autonomous Overnight Work)
+                                         |
+                      +------------------+------------------+
+                      |                                     |
+             (Goal accomplished)                   (Needs user decision)
+                      |                                     |
+                      v                                     v
+        +---------------------------+         +-------------------------------+
+        |         Completed         |         |       Blocked on Question     |
+        | `- [ ] Task #ai/done [[📄]]` |       | `- [ ] Task #ai/question [[📄]]`|
+        +---------------------------+         +---------------+---------------+
+                                                              |
+                                                    (User answers question &
+                                                     explicitly retags to `#ai`)
+                                                              |
+                                                              v
+                                                    (Re-enters nightly queue)
 ```
 
 | Tag / State | Who Sets It | Scanner & Nightly Job Behavior |
 | :--- | :--- | :--- |
 | **`- [ ] ... #ai`** (or `#ai/todo`) | **You** | Queued backlog item. Selected in prioritized batch. |
 | **`- [ ] ... #ai/focus`** | **You** | High Priority. Selected first on the next nightly run. |
-| **`- [ ] ... #ai/in-progress [[Dossier\|📄]]`** | **Agent** | Active multi-night task. Agent reloads dossier and continues work. |
-| **`- [ ] ... #ai/question`** | **Agent** | Waiting on user feedback. Pauses until a reply bullet is added. |
-| **`- [ ] ... #ai/paused`** | **You** | **Completely ignored** by the scanner until unpaused. |
-| **`- [x] ... #ai/done`** | **Agent / You** | **Completely ignored** by the scanner. |
+| **`- [ ] ... #ai/question [[Dossier\|📄]]`** | **Agent** | Waiting on user feedback. **Ignored** by scanner until you explicitly retag to `#ai` (or `#ai/focus`). |
+| **`- [ ] ... #ai/done [[Dossier\|📄]]`** (or `- [x]`) | **Agent / You** | Work completed. **Completely ignored** by the scanner. |
+| **`- [ ] ... #ai/paused`** | **You** | On hold. **Completely ignored** by the scanner until unpaused. |
 | **No `#ai` tag** | **You** | Normal manual todo item. **Completely ignored**. |
 
 ### 3. Inline Task Linking & Sub-Bullets
@@ -251,14 +249,14 @@ Tasks are controlled using standard markdown checkboxes and `#ai` tags:
 When the agent acts on a task, it updates the original note using clean inline links:
 
 ```markdown
-- [ ] Migrate InfluxDB to VictoriaMetrics #ai/in-progress [[Brain_Operations/Dossiers/VictoriaMetrics Migration.md|📄]]
+- [ ] Migrate InfluxDB to VictoriaMetrics #ai/question [[Brain_Operations/Dossiers/VictoriaMetrics Migration.md|📄]]
   - **Latest Update (2026-10-11)**: Complete implementation playbook with Proxmox NFS bind-mount.
-  - **Question for User**: Dedicated LXC container for Grafana or shared?
+  - **Question for the user**: Dedicated LXC container for Grafana or shared?
 ```
 
 - **1-Click Navigation:** Tapping the `📄` icon opens the living dossier immediately on phone or laptop.
 - **No Bullet Clutter:** Only a single consolidated `Latest Update` line is kept beneath the task. Historical activity is stored inside the dossier's internal activity log.
-- **Replying to Questions:** Simply add an indented bullet beneath the task (e.g. `- Let's use a dedicated container`). The scanner captures your note and boosts the task's priority for tonight's run.
+- **Replying to Questions:** Add an indented reply bullet beneath the question, and retag the line back to `#ai` (or `#ai/focus`). The scanner will then pick it up again on the next nightly run.
 
 ---
 
@@ -272,7 +270,7 @@ Rather than generating disconnected daily notes, each task has **exactly one per
 task: "<Original Task Title>"
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
-status: in-progress | completed | needs-clarification
+status: completed | needs-clarification
 source_note: "[[<Path to Note>]]"
 ---
 

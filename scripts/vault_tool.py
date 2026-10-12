@@ -69,8 +69,8 @@ def scan_vault(vault_path: Path, excludes: Optional[set] = None) -> List[Dict[st
                     tags = AI_TAG_REGEX.findall(content)
                     tag_names = [t.lower() for t in tags]
                     
-                    # Ignore completed or paused tasks
-                    if any(t in ['#ai/done', '#ai/paused', '#ai/pause', '#ai/stop'] for t in tag_names):
+                    # Ignore completed, question-blocked, or paused tasks
+                    if any(t in ['#ai/done', '#ai/question', '#ai/paused', '#ai/pause', '#ai/stop'] for t in tag_names):
                         i += 1
                         continue
 
@@ -231,7 +231,7 @@ def main():
     update_parser.add_argument("--vault", required=True, help="Path to Obsidian vault")
     update_parser.add_argument("--file", required=True, help="Relative file path in vault")
     update_parser.add_argument("--line", required=True, type=int, help="Line number of the task")
-    update_parser.add_argument("--new-tag", default=None, help="New tag (e.g., #ai/in-progress, #ai/done)")
+    update_parser.add_argument("--new-tag", default=None, help="New tag (e.g., #ai/done, #ai/question)")
     update_parser.add_argument("--summary", required=True, help="Consolidated latest status summary")
     update_parser.add_argument("--dossier", default=None, help="Relative path to living dossier (without dates in filename)")
     update_parser.add_argument("--question", default=None, help="Optional active question for the user")
