@@ -156,23 +156,22 @@ Execute a manual run:
  |   | 2. Orchestration Layer (Systemd Timer + `scripts/run_nightly.sh`)         |   |
  |   |    - Wakes up nightly at 02:30 AM                                         |   |
  |   |    - Bootstraps NVM/Node environment for non-interactive shells           |   |
- |   |    - Enforces turn timeouts and task batch caps                           |   |
+ |   |    - Sequential outer loop: dispatches up to $MAX_TASKS isolated sessions  |   |
+ |   |    - Eliminates cross-task context bleed and avoids line number drift     |   |
  |   +-------------------------------------+-------------------------------------+   |
  |                                         |                                         |
  |                                         v                                         |
  |   +---------------------------------------------------------------------------+   |
- |   | 3. Antigravity Agent Core (`agy -p`)                                      |   |
+ |   | 3. Antigravity Agent Core (`agy -p` per task)                             |   |
  |   |    - Custom Skill: `obsidian-nightly-operator`                            |   |
- |   |    - Fast Scanner: `scripts/vault_tool.py`                                |   |
- |   |    - Phase A: Scan & Triage (Discovers `#ai`, `#ai/focus` + notes)        |   |
- |   |    - Phase B: Durable Memory Recall (Reads existing living dossiers)      |   |
- |   |    - Phase C: Execution Cycle                                             |   |
- |   |        * Scoping: Requirement breakdown & clarifying questions            |   |
- |   |        * Research: Web search, technical synthesis, benchmarks            |   |
- |   |        * Implementation: Code, scripts, blueprints, drafts                |   |
+ |   |    - Clean Context per Task: Reads Tier 4 `MEMORY.md` & task dossier       |   |
+ |   |    - Fast Scanner: `scripts/vault_tool.py` (locates next task)            |   |
+ |   |    - Phase A: Task Load & Triage (Reads targeted task and user notes)     |   |
+ |   |    - Phase B: Durable Memory Recall (Reads existing living dossier)        |   |
+ |   |    - Phase C: Execution Cycle (Research, blueprints, synthesis)            |   |
  |   |    - Phase D: Vault Updates & Linking                                     |   |
  |   |        * Updates/creates single living dossier in `Brain_Operations/`     |   |
- |   |        * Adds inline `[[Dossier|📄]]` and consolidated status bullet      |   |
+ |   |        * Resolves task to `#ai/done` or `#ai/question`                     |   |
  |   |        * Appends run summary to `Brain_Operations/00_Nightly_Log.md`      |   |
  |   +-------------------------------------+-------------------------------------+   |
  |                                         |                                         |

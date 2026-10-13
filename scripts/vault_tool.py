@@ -226,6 +226,11 @@ def main():
     scan_parser.add_argument("--json", action="store_true", help="Output JSON format")
     scan_parser.add_argument("--limit", type=int, default=0, help="Limit number of tasks returned")
 
+    # next subcommand
+    next_parser = subparsers.add_parser("next", help="Get next highest-priority #ai task")
+    next_parser.add_argument("--vault", required=True, help="Path to Obsidian vault")
+    next_parser.add_argument("--exclude", default=None, help="Comma-separated task IDs to exclude")
+
     # update subcommand
     update_parser = subparsers.add_parser("update", help="Update task in original note")
     update_parser.add_argument("--vault", required=True, help="Path to Obsidian vault")
@@ -258,6 +263,19 @@ def main():
                         for n in t['user_notes']:
                             print(f"     Note: {n}")
                     print()
+
+    elif args.command == "next":
+        excluded_ids = set(args.exclude.split(',')) if args.exclude else set()
+        tasks = scan_vault(vault_path)
+        next_task = None
+        for t in tasks:
+            if t['id'] not in excluded_ids and t['file'] not in excluded_ids:
+                next_task = t
+                break
+        if next_task:
+            print(json.dumps(next_task, indent=2))
+        else:
+            print("null")
 
     elif args.command == "update":
         success = append_progress_to_note(

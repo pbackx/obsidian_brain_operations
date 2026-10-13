@@ -34,6 +34,7 @@ BACKUP_DIR="${BACKUP_DIR:-$HOME/vault_sync/backups}"
 MAX_TASKS="${MAX_TASKS:-3}"
 EFFORT="${EFFORT:-high}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-1800}"
+TASK_TIMEOUT="${TASK_TIMEOUT:-600}"
 
 LOG_DIR="$BASE_DIR/logs"
 mkdir -p "$LOG_DIR"
@@ -93,27 +94,68 @@ if [[ ! -d "$VAULT_LOCAL" ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Step 2: Run Quick Scan Check
+# Step 2: Overview Scan
 # ------------------------------------------------------------------------------
 echo "[2/4] Scanning vault for pending #ai tasks..."
 python3 "$SCRIPT_DIR/vault_tool.py" scan --vault "$VAULT_LOCAL" --limit "$MAX_TASKS"
 
 # ------------------------------------------------------------------------------
-# Step 3: Execute Antigravity Agent
+# Step 3: Sequential Task Loop (Isolated Clean Context per Task)
 # ------------------------------------------------------------------------------
-echo "[3/4] Launching Antigravity CLI in headless print mode..."
+echo "[3/4] Starting sequential task loop (up to $MAX_TASKS tasks, 1 clean session each)..."
 cd "$BASE_DIR"
 
-PROMPT="Activate skill obsidian-nightly-operator. Vault directory is $VAULT_LOCAL. Write all output strictly in English. Run the nightly triage, execute steps for up to $MAX_TASKS prioritized tasks, generate dossiers in Brain_Operations/Dossiers/, update original notes with progress links, and update Brain_Operations/00_Nightly_Log.md."
+PROCESSED_IDS=""
+TASK_COUNT=0
 
-if agy -p "$PROMPT" \
-    --effort "$EFFORT" \
-    --dangerously-skip-permissions \
-    --print-timeout "${TIMEOUT_SECONDS}s"; then
-    echo "Antigravity execution completed successfully."
-else
-    echo "WARNING: Antigravity execution reported non-zero status or timed out."
-fi
+for ((i=1; i<=MAX_TASKS; i++)); do
+    echo "------------------------------------------------------------"
+    echo " Locating next prioritized task ($i/$MAX_TASKS)..."
+    echo "------------------------------------------------------------"
+
+    TASK_JSON=$(python3 "$SCRIPT_DIR/vault_tool.py" next --vault "$VAULT_LOCAL" ${PROCESSED_IDS:+--exclude "$PROCESSED_IDS"})
+
+    if [[ -z "$TASK_JSON" || "$TASK_JSON" == "null" || "$TASK_JSON" == "{}" ]]; then
+        echo "No more pending #ai tasks found tonight."
+        break
+    fi
+
+    # Parse task details safely
+    TASK_ID=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('id', ''))" "$TASK_JSON")
+    TASK_FILE=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('file', ''))" "$TASK_JSON")
+    TASK_LINE=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('line_number', ''))" "$TASK_JSON")
+    TASK_TITLE=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('title', ''))" "$TASK_JSON")
+
+    echo ">>> [Task $i/$MAX_TASKS] Starting: $TASK_TITLE"
+    echo "    Location: $TASK_FILE (line $TASK_LINE)"
+    echo "    ID:       $TASK_ID"
+
+    TASK_PROMPT="Activate skill obsidian-nightly-operator. Vault directory is $VAULT_LOCAL. Write all output strictly in English. Process ONLY the single task at '$TASK_FILE' line $TASK_LINE. Ingest Brain_Operations/MEMORY.md if present. Advance the task, update or create its Living Dossier in Brain_Operations/Dossiers/, update the original note with vault_tool.py update (using --new-tag '#ai/done' or '#ai/question'), and append tonight's action to Brain_Operations/00_Nightly_Log.md."
+
+    TASK_START=$(date +%s)
+    if agy -p "$TASK_PROMPT" \
+        --effort "$EFFORT" \
+        --dangerously-skip-permissions \
+        --print-timeout "${TASK_TIMEOUT}s"; then
+        TASK_END=$(date +%s)
+        TASK_DURATION=$((TASK_END - TASK_START))
+        echo ">>> [Task $i/$MAX_TASKS] Completed successfully in ${TASK_DURATION}s."
+    else
+        echo ">>> WARNING: [Task $i/$MAX_TASKS] Reported non-zero status or timed out."
+    fi
+
+    # Track processed task ID to prevent duplicate runs
+    if [[ -z "$PROCESSED_IDS" ]]; then
+        PROCESSED_IDS="$TASK_ID"
+    else
+        PROCESSED_IDS="$PROCESSED_IDS,$TASK_ID"
+    fi
+    TASK_COUNT=$((TASK_COUNT + 1))
+done
+
+echo "============================================================"
+echo " Finished processing $TASK_COUNT task(s) in outer loop."
+echo "============================================================"
 
 # ------------------------------------------------------------------------------
 # Step 4: Post-run Sync
