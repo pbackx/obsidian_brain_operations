@@ -197,6 +197,7 @@ My Obsidian Vault/
 ├── Projects/               <-- Your project notes
 └── Brain_Operations/       <-- Managed by Antigravity
     ├── 00_Nightly_Log.md   <-- Chronological ledger of all nightly runs
+    ├── Dossier_Dashboard.md <-- Dynamic dashboard powered by Dataview
     └── Dossiers/           <-- Living Dossiers (one persistent file per task)
         ├── VictoriaMetrics Migration.md
         └── SQLite Vector Search Evaluation.md
@@ -302,6 +303,21 @@ source_note: "[[<Path to Note>]]"
 
 On subsequent nights, the agent reads this file first to load full context, updates the architecture in-place, and appends the latest milestones to the `## Activity Log`.
 
+### Dynamic Dossier Dashboard (Dataview)
+
+To easily visualize and track living dossiers without manual navigation, a dynamic dashboard template is provided in [`templates/Dossier_Dashboard.md`](templates/Dossier_Dashboard.md).
+
+Copy it into your vault:
+```bash
+cp templates/Dossier_Dashboard.md "$VAULT_LOCAL/Brain_Operations/Dossier_Dashboard.md"
+```
+
+When opened in Obsidian with the **Dataview** community plugin enabled, it automatically renders:
+- **Recently Updated:** Living dossiers modified within the last 48 hours (`dur(2 days)`).
+- **Awaiting User Decision:** Living dossiers with status `needs-clarification` (corresponding to `#ai/question`).
+- **All Active Dossiers:** All living dossiers sorted by recency.
+- **Archived Dossiers:** Historical or completed dossiers.
+
 ---
 
 ## Repository Structure
@@ -318,6 +334,8 @@ brain_operations/
 ├── scripts/
 │   ├── run_nightly.sh               # Master execution & sync runner
 │   └── vault_tool.py                # High-speed Python vault scanner & updater
+├── templates/
+│   └── Dossier_Dashboard.md         # Dynamic Dataview dashboard for your vault
 ├── logs/                            # (Ignored) Timestamped execution logs
 ├── README.md                        # Documentation
 └── .gitignore                       # Git ignore rules
