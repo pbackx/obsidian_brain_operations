@@ -33,8 +33,8 @@ VAULT_REMOTE="${VAULT_REMOTE:-}"
 BACKUP_DIR="${BACKUP_DIR:-$HOME/vault_sync/backups}"
 MAX_TASKS="${MAX_TASKS:-3}"
 EFFORT="${EFFORT:-high}"
-TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-1800}"
-TASK_TIMEOUT="${TASK_TIMEOUT:-600}"
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10800}"
+TASK_TIMEOUT="${TASK_TIMEOUT:-1800}"
 
 LOG_DIR="$BASE_DIR/logs"
 mkdir -p "$LOG_DIR"
@@ -51,6 +51,7 @@ echo " Sync Method:   $SYNC_METHOD"
 echo " Node Version:  $(command -v node >/dev/null && node -v || echo 'Not found')"
 echo " Obsidian CLI:  $(command -v ob >/dev/null && echo 'Ready' || echo 'Not installed / not in PATH')"
 echo " Max Tasks:     $MAX_TASKS"
+echo " Time Budget:   ${TIMEOUT_SECONDS}s total (max ${TASK_TIMEOUT}s per task)"
 echo " Effort:        $EFFORT"
 echo " Log File:      $LOG_FILE"
 echo "============================================================"
@@ -102,15 +103,33 @@ python3 "$SCRIPT_DIR/vault_tool.py" scan --vault "$VAULT_LOCAL" --limit "$MAX_TA
 # ------------------------------------------------------------------------------
 # Step 3: Sequential Task Loop (Isolated Clean Context per Task)
 # ------------------------------------------------------------------------------
-echo "[3/4] Starting sequential task loop (up to $MAX_TASKS tasks, 1 clean session each)..."
+echo "[3/4] Starting sequential task loop (up to $MAX_TASKS tasks, ${TIMEOUT_SECONDS}s total budget)..."
 cd "$BASE_DIR"
 
 PROCESSED_IDS=""
 TASK_COUNT=0
+LOOP_START=$(date +%s)
 
 for ((i=1; i<=MAX_TASKS; i++)); do
+    NOW=$(date +%s)
+    ELAPSED=$((NOW - LOOP_START))
+    REMAINING=$((TIMEOUT_SECONDS - ELAPSED))
+
+    if (( REMAINING <= 60 )); then
+        echo "------------------------------------------------------------"
+        echo " Total nightly time budget (${TIMEOUT_SECONDS}s) reached (${ELAPSED}s elapsed)."
+        echo " Stopping loop cleanly so post-run sync can complete."
+        echo "------------------------------------------------------------"
+        break
+    fi
+
+    CURRENT_TASK_TIMEOUT="$TASK_TIMEOUT"
+    if (( REMAINING < CURRENT_TASK_TIMEOUT )); then
+        CURRENT_TASK_TIMEOUT="$REMAINING"
+    fi
+
     echo "------------------------------------------------------------"
-    echo " Locating next prioritized task ($i/$MAX_TASKS)..."
+    echo " Locating next prioritized task ($i/$MAX_TASKS) | Budget: ${ELAPSED}s / ${TIMEOUT_SECONDS}s used"
     echo "------------------------------------------------------------"
 
     TASK_JSON=$(python3 "$SCRIPT_DIR/vault_tool.py" next --vault "$VAULT_LOCAL" ${PROCESSED_IDS:+--exclude "$PROCESSED_IDS"})
@@ -129,6 +148,7 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     echo ">>> [Task $i/$MAX_TASKS] Starting: $TASK_TITLE"
     echo "    Location: $TASK_FILE (line $TASK_LINE)"
     echo "    ID:       $TASK_ID"
+    echo "    Timeout:  ${CURRENT_TASK_TIMEOUT}s (Remaining nightly budget: ${REMAINING}s)"
 
     TASK_PROMPT="Activate skill obsidian-nightly-operator. Vault directory is $VAULT_LOCAL. Write all output strictly in English. Process ONLY the single task at '$TASK_FILE' line $TASK_LINE. Ingest Brain_Operations/MEMORY.md if present. Advance the task, update or create its Living Dossier in Brain_Operations/Dossiers/, update the original note with vault_tool.py update (using --new-tag '#ai/done' or '#ai/question'), and append tonight's action to Brain_Operations/00_Nightly_Log.md."
 
@@ -136,12 +156,14 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     if agy -p "$TASK_PROMPT" \
         --effort "$EFFORT" \
         --dangerously-skip-permissions \
-        --print-timeout "${TASK_TIMEOUT}s"; then
+        --print-timeout "${CURRENT_TASK_TIMEOUT}s"; then
         TASK_END=$(date +%s)
         TASK_DURATION=$((TASK_END - TASK_START))
         echo ">>> [Task $i/$MAX_TASKS] Completed successfully in ${TASK_DURATION}s."
     else
-        echo ">>> WARNING: [Task $i/$MAX_TASKS] Reported non-zero status or timed out."
+        TASK_END=$(date +%s)
+        TASK_DURATION=$((TASK_END - TASK_START))
+        echo ">>> WARNING: [Task $i/$MAX_TASKS] Reported non-zero status or timed out after ${TASK_DURATION}s."
     fi
 
     # Track processed task ID to prevent duplicate runs
@@ -153,8 +175,9 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     TASK_COUNT=$((TASK_COUNT + 1))
 done
 
+TOTAL_ELAPSED=$(( $(date +%s) - LOOP_START ))
 echo "============================================================"
-echo " Finished processing $TASK_COUNT task(s) in outer loop."
+echo " Finished processing $TASK_COUNT task(s) in ${TOTAL_ELAPSED}s."
 echo "============================================================"
 
 # ------------------------------------------------------------------------------
