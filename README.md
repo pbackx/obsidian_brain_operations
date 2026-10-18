@@ -320,6 +320,19 @@ When opened in Obsidian with the **Dataview** community plugin enabled, it autom
 
 ---
 
+## Freewrite Smart Typewriter Integration (`scripts/freewrite_ingest.py`)
+
+If you use an **Astrohaus Freewrite** device connected to **Postbox** with cloud mirroring (e.g., Google Drive or NAS Cloud Sync), `scripts/freewrite_ingest.py` automatically imports your drafts into Obsidian (`Freewrite/<YYYY-MM-DD> - <Title>.md`) and converts shorthand task markers into actionable `#ai` tasks right before the nightly scan:
+
+- **Zero External Dependencies:** Natively parses `.txt`, `.md`, and `.docx` drafts (extracting paragraphs from Postbox's default `.docx` exports via Python's standard `zipfile` + `xml.etree.ElementTree`).
+- **Ergonomic Typewriter Shorthand:**
+  - `- [ ] Task #ai` or `- Task #ai` $\rightarrow$ `- [ ] Task #ai`
+  - `AI: Research topic` or `TODO: Research topic #ai` $\rightarrow$ `- [ ] Research topic #ai`
+  - Whole-draft `#ai` marker (or drafts placed in a designated folder via `FREEWRITE_AI_FOLDERS="C"`) $\rightarrow$ automatically adds a top-level `- [ ] Freewrite brain dump: <Title> #ai` task header so the nightly operator analyzes the entire draft and creates a Living Dossier.
+- **Idempotent Sync Safety:** Tracks SHA-256 hashes in `Brain_Operations/.freewrite_state.json` so source files in Google Drive (`Postbox/A`, `Postbox/B`, `Postbox/C`) remain untouched, avoiding one-way Postbox sync conflicts.
+
+---
+
 ## Repository Structure
 
 ```
@@ -332,6 +345,8 @@ brain_operations/
 │   ├── settings.env.example         # Template configuration file
 │   └── settings.env                 # (Ignored) Your local environment settings
 ├── scripts/
+│   ├── check_models.sh              # Antigravity CLI model entitlement monitor
+│   ├── freewrite_ingest.py          # Freewrite Postbox (.txt/.md/.docx) -> Vault ingester
 │   ├── run_nightly.sh               # Master execution & sync runner
 │   └── vault_tool.py                # High-speed Python vault scanner & updater
 ├── templates/

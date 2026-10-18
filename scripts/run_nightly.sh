@@ -36,6 +36,14 @@ EFFORT="${EFFORT:-high}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10800}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-1800}"
 
+# Optional Freewrite Postbox (Google Drive / NAS) ingestion settings
+FREEWRITE_ENABLED="${FREEWRITE_ENABLED:-false}"
+FREEWRITE_SOURCE_DIR="${FREEWRITE_SOURCE_DIR:-$HOME/vault_sync/freewrite_postbox}"
+FREEWRITE_RCLONE_REMOTE="${FREEWRITE_RCLONE_REMOTE:-}"
+FREEWRITE_VAULT_SUBDIR="${FREEWRITE_VAULT_SUBDIR:-Freewrite}"
+FREEWRITE_FOLDERS="${FREEWRITE_FOLDERS:-}"
+FREEWRITE_AI_FOLDERS="${FREEWRITE_AI_FOLDERS:-}"
+
 LOG_DIR="$BASE_DIR/logs"
 mkdir -p "$LOG_DIR"
 TIMESTAMP="$(date +"%Y-%m-%d_%H%M%S")"
@@ -92,6 +100,32 @@ if [[ ! -d "$VAULT_LOCAL" ]]; then
     echo "ERROR: Local vault directory does not exist: $VAULT_LOCAL"
     echo "Please set up your vault directory or adjust VAULT_LOCAL in $CONFIG_FILE"
     exit 1
+fi
+
+# ------------------------------------------------------------------------------
+# Step 1b: Optional Freewrite Postbox Ingestion (Google Drive / NAS -> Vault)
+# ------------------------------------------------------------------------------
+if [[ "${FREEWRITE_ENABLED,,}" == "true" ]]; then
+    echo "[1b/4] Checking Freewrite Postbox inbox..."
+    if [[ -n "$FREEWRITE_RCLONE_REMOTE" ]] && command -v rclone >/dev/null 2>&1; then
+        mkdir -p "$FREEWRITE_SOURCE_DIR"
+        echo "       Pulling Freewrite drafts from $FREEWRITE_RCLONE_REMOTE -> $FREEWRITE_SOURCE_DIR..."
+        rclone copy "$FREEWRITE_RCLONE_REMOTE" "$FREEWRITE_SOURCE_DIR" || {
+            echo "WARNING: rclone copy from $FREEWRITE_RCLONE_REMOTE encountered an issue."
+        }
+    fi
+    if [[ -d "$FREEWRITE_SOURCE_DIR" ]]; then
+        python3 "$SCRIPT_DIR/freewrite_ingest.py" \
+            --source "$FREEWRITE_SOURCE_DIR" \
+            --vault "$VAULT_LOCAL" \
+            --subdir "$FREEWRITE_VAULT_SUBDIR" \
+            ${FREEWRITE_FOLDERS:+--folders "$FREEWRITE_FOLDERS"} \
+            ${FREEWRITE_AI_FOLDERS:+--ai-folders "$FREEWRITE_AI_FOLDERS"} || {
+            echo "WARNING: Freewrite ingestion encountered an error."
+        }
+    else
+        echo "WARNING: FREEWRITE_ENABLED is true, but source directory not found: $FREEWRITE_SOURCE_DIR"
+    fi
 fi
 
 # ------------------------------------------------------------------------------
