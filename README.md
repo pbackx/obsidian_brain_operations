@@ -333,6 +333,16 @@ If you use an **Astrohaus Freewrite** device connected to **Postbox** with cloud
 
 ---
 
+## Quota-Aware Model Routing & Automatic Fallback (`scripts/check_quota.py`)
+
+On **Google AI Pro**, Antigravity separates model usage into three independent quota pools (`Gemini 4 Argon`, `Gemini Models`, and `Claude and GPT models`). Because `agy`'s built-in `--effort high` resolver does not check remaining quota before selecting a model, `scripts/check_quota.py` queries `agy -p "/usage" --output-format json` (which consumes **0 tokens**) before each task in `scripts/run_nightly.sh`:
+
+- **Live Quota Inspection:** Displays remaining percentage and local reset times for all weekly and 5-hour buckets (`./scripts/check_quota.py` or `./scripts/check_quota.py --markdown`).
+- **Daytime Reserve Protection (`ARGON_RESERVE_PCT=20`):** Preserves a configurable percentage of your weekly `Gemini 4 Argon` quota for interactive daytime sessions. When Argon drops below `ARGON_RESERVE_PCT` (or optionally steps down to `gemini-4-argon-medium` below `ARGON_MEDIUM_BELOW_PCT`), `run_nightly.sh` automatically switches to `FALLBACK_MODELS` (`claude-opus-5-5-high`, `gemini-3.8-flash-high`, `claude-sonnet-5-5-high`, `gemini-3.8-flash-medium`).
+- **Mid-Run Exhaustion Retry:** If a task fails mid-execution due to bucket exhaustion, `run_nightly.sh` automatically excludes the exhausted model and retries the task on the next available fallback bucket.
+
+---
+
 ## Repository Structure
 
 ```
@@ -346,6 +356,7 @@ brain_operations/
 │   └── settings.env                 # (Ignored) Your local environment settings
 ├── scripts/
 │   ├── check_models.sh              # Antigravity CLI model entitlement monitor
+│   ├── check_quota.py               # Zero-token quota inspector & automatic model router
 │   ├── freewrite_ingest.py          # Freewrite Postbox (.txt/.md/.docx) -> Vault ingester
 │   ├── run_nightly.sh               # Master execution & sync runner
 │   └── vault_tool.py                # High-speed Python vault scanner & updater

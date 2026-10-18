@@ -36,6 +36,14 @@ EFFORT="${EFFORT:-high}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10800}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-1800}"
 
+# Quota-aware model routing & automatic fallback settings
+QUOTA_AUTO_DOWNGRADE="${QUOTA_AUTO_DOWNGRADE:-true}"
+PRIMARY_MODEL="${PRIMARY_MODEL:-gemini-4-argon-high}"
+ARGON_MEDIUM_BELOW_PCT="${ARGON_MEDIUM_BELOW_PCT:-0}"
+ARGON_RESERVE_PCT="${ARGON_RESERVE_PCT:-20}"
+FALLBACK_MODELS="${FALLBACK_MODELS:-claude-opus-5-5-high,gemini-3.8-flash-high,claude-sonnet-5-5-high,gemini-3.8-flash-medium}"
+FALLBACK_MIN_PCT="${FALLBACK_MIN_PCT:-5}"
+
 # Optional Freewrite Postbox (Google Drive / NAS) ingestion settings
 FREEWRITE_ENABLED="${FREEWRITE_ENABLED:-false}"
 FREEWRITE_SOURCE_DIR="${FREEWRITE_SOURCE_DIR:-$HOME/vault_sync/freewrite_postbox}"
@@ -61,6 +69,7 @@ echo " Obsidian CLI:  $(command -v ob >/dev/null && echo 'Ready' || echo 'Not in
 echo " Max Tasks:     $MAX_TASKS"
 echo " Time Budget:   ${TIMEOUT_SECONDS}s total (max ${TASK_TIMEOUT}s per task)"
 echo " Effort:        $EFFORT"
+echo " Auto Fallback: $QUOTA_AUTO_DOWNGRADE (Primary: $PRIMARY_MODEL, Argon Reserve: ${ARGON_RESERVE_PCT}%)"
 echo " Log File:      $LOG_FILE"
 echo "============================================================"
 
@@ -129,10 +138,17 @@ if [[ "${FREEWRITE_ENABLED,,}" == "true" ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Step 2: Overview Scan
+# Step 2: Overview Scan & Live Quota Check
 # ------------------------------------------------------------------------------
 echo "[2/4] Scanning vault for pending #ai tasks..."
 python3 "$SCRIPT_DIR/vault_tool.py" scan --vault "$VAULT_LOCAL" --limit "$MAX_TASKS"
+
+if [[ -f "$SCRIPT_DIR/check_quota.py" ]]; then
+    echo "[2b/4] Checking live Antigravity quota buckets..."
+    python3 "$SCRIPT_DIR/check_quota.py" || {
+        echo "WARNING: Quota check encountered an issue, continuing with default model settings."
+    }
+fi
 
 # ------------------------------------------------------------------------------
 # Step 3: Sequential Task Loop (Isolated Clean Context per Task)
@@ -179,25 +195,58 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     TASK_LINE=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('line_number', ''))" "$TASK_JSON")
     TASK_TITLE=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('title', ''))" "$TASK_JSON")
 
+    # Resolve model dynamically before each task based on live quota buckets
+    SELECTED_MODEL=""
+    AGY_MODEL_ARGS=(--effort "$EFFORT")
+    if [[ "${QUOTA_AUTO_DOWNGRADE,,}" == "true" && -f "$SCRIPT_DIR/check_quota.py" ]]; then
+        SELECTED_MODEL=$(python3 "$SCRIPT_DIR/check_quota.py" --select-model 2>/dev/null || echo "")
+        if [[ -n "$SELECTED_MODEL" ]]; then
+            # Model slugs in agy (e.g. gemini-4-argon-high, claude-opus-5-5-high, gemini-3.8-flash-high)
+            # already encode their effort level; passing --model sets both model and effort cleanly.
+            AGY_MODEL_ARGS=(--model "$SELECTED_MODEL")
+        fi
+    fi
+
     echo ">>> [Task $i/$MAX_TASKS] Starting: $TASK_TITLE"
     echo "    Location: $TASK_FILE (line $TASK_LINE)"
     echo "    ID:       $TASK_ID"
+    echo "    Model:    ${SELECTED_MODEL:-default (--effort $EFFORT)}"
     echo "    Timeout:  ${CURRENT_TASK_TIMEOUT}s (Remaining nightly budget: ${REMAINING}s)"
 
     TASK_PROMPT="Activate skill obsidian-nightly-operator. Vault directory is $VAULT_LOCAL. Write all output strictly in English. Process ONLY the single task at '$TASK_FILE' line $TASK_LINE. Ingest Brain_Operations/MEMORY.md if present. Advance the task, update or create its Living Dossier in Brain_Operations/Dossiers/, update the original note with vault_tool.py update (using --new-tag '#ai/done' or '#ai/question'), and append tonight's action to Brain_Operations/00_Nightly_Log.md."
 
     TASK_START=$(date +%s)
     if agy -p "$TASK_PROMPT" \
-        --effort "$EFFORT" \
+        "${AGY_MODEL_ARGS[@]}" \
         --dangerously-skip-permissions \
         --print-timeout "${CURRENT_TASK_TIMEOUT}s"; then
         TASK_END=$(date +%s)
         TASK_DURATION=$((TASK_END - TASK_START))
-        echo ">>> [Task $i/$MAX_TASKS] Completed successfully in ${TASK_DURATION}s."
+        echo ">>> [Task $i/$MAX_TASKS] Completed successfully in ${TASK_DURATION}s (model: ${SELECTED_MODEL:-default})."
     else
         TASK_END=$(date +%s)
         TASK_DURATION=$((TASK_END - TASK_START))
-        echo ">>> WARNING: [Task $i/$MAX_TASKS] Reported non-zero status or timed out after ${TASK_DURATION}s."
+        echo ">>> WARNING: [Task $i/$MAX_TASKS] Reported non-zero status or timed out after ${TASK_DURATION}s (model: ${SELECTED_MODEL:-default})."
+
+        # If auto-downgrade is enabled and the failure happened quickly (e.g., mid-task quota exhaustion
+        # rather than a full task timeout), attempt one automatic fallback retry on the next model bucket.
+        if [[ "${QUOTA_AUTO_DOWNGRADE,,}" == "true" && -n "$SELECTED_MODEL" ]] && (( TASK_DURATION < CURRENT_TASK_TIMEOUT - 30 )); then
+            RETRY_MODEL=$(python3 "$SCRIPT_DIR/check_quota.py" --select-model --exclude-models "$SELECTED_MODEL" 2>/dev/null || echo "")
+            if [[ -n "$RETRY_MODEL" && "$RETRY_MODEL" != "$SELECTED_MODEL" ]]; then
+                echo ">>> [Task $i/$MAX_TASKS] Retrying automatically with fallback model: $RETRY_MODEL"
+                RETRY_START=$(date +%s)
+                if agy -p "$TASK_PROMPT" \
+                    --model "$RETRY_MODEL" \
+                    --dangerously-skip-permissions \
+                    --print-timeout "${CURRENT_TASK_TIMEOUT}s"; then
+                    RETRY_END=$(date +%s)
+                    echo ">>> [Task $i/$MAX_TASKS] Fallback retry on $RETRY_MODEL succeeded in $((RETRY_END - RETRY_START))s."
+                else
+                    RETRY_END=$(date +%s)
+                    echo ">>> WARNING: [Task $i/$MAX_TASKS] Fallback retry on $RETRY_MODEL also failed after $((RETRY_END - RETRY_START))s."
+                fi
+            fi
+        fi
     fi
 
     # Track processed task ID to prevent duplicate runs
