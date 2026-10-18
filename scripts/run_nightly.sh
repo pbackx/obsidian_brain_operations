@@ -3,6 +3,10 @@
 # run_nightly.sh - Antigravity Nightly Autonomous Task Runner
 # ==============================================================================
 
+# Wrap the entire script in a brace group `{ ...; exit $?; }` so Bash parses
+# the full script into memory at startup. This prevents byte-offset corruption
+# if an autonomous agent modifies run_nightly.sh in-place during a nightly run.
+{
 set -euo pipefail
 
 # ------------------------------------------------------------------------------
@@ -291,3 +295,5 @@ esac
 echo "============================================================"
 echo " Nightly run finished at $(date)"
 echo "============================================================"
+exit $?
+}
