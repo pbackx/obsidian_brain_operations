@@ -301,7 +301,8 @@ def ingest_directory(
                 continue
 
             mtime = datetime.fromtimestamp(fpath.stat().st_mtime)
-            date_str = mtime.strftime('%Y-%m-%d')
+            fname_date_match = re.match(r'^(\d{4}-\d{2}-\d{2})\b', fpath.stem)
+            date_str = fname_date_match.group(1) if fname_date_match else mtime.strftime('%Y-%m-%d')
             iso_ts = mtime.strftime('%Y-%m-%d %H:%M')
 
             title, body = derive_title_and_body(raw_text, fpath.stem)
