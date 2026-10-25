@@ -346,8 +346,16 @@ def ingest_directory(
                     prev_raw = prev_entry.get("raw_text", "") if prev_entry else ""
                     new_addition = raw_text[len(prev_raw):].strip() if prev_raw and raw_text.startswith(prev_raw) else raw_text
                     if new_addition:
-                        # Re-open #ai/question -> #ai if user added follow-up remarks on the Freewrite
+                        # Re-open #ai/question (or #ai/done in AI folders / with #ai) -> #ai if user added follow-up remarks
                         updated_existing = re.sub(r'#ai/question\b', '#ai', existing_content, flags=re.IGNORECASE)
+                        if force_ai or AI_TAG_REGEX.search(new_addition):
+                            updated_existing = re.sub(
+                                r'^(\s*)- \[[xX \t]\](\s+.*?)#ai/done\b',
+                                r'\1- [ ]\2#ai',
+                                updated_existing,
+                                count=1,
+                                flags=re.IGNORECASE | re.MULTILINE,
+                            )
                         note_markdown = (
                             f"{updated_existing.rstrip()}\n\n"
                             f"## Freewrite Follow-Up ({iso_ts})\n\n"
