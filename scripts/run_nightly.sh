@@ -27,8 +27,10 @@ BASE_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG_FILE="$BASE_DIR/config/settings.env"
 
 if [[ -f "$CONFIG_FILE" ]]; then
+    set -a
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
+    set +a
 fi
 
 VAULT_LOCAL="${VAULT_LOCAL:-$HOME/vault_sync/ObsidianVault}"
