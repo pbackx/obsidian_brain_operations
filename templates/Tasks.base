@@ -22,7 +22,7 @@ views:
     name: "📋 All Active Kanban"
     filters:
       and:
-        - status != "archived"
+        - '!file.inFolder("TODO/Archive")'
     groupBy:
       property: status
       direction: ASC
@@ -32,6 +32,7 @@ views:
       - needs-clarification
       - in-progress
       - completed
+      - archived
     order:
       - file.name
       - category
@@ -41,11 +42,12 @@ views:
     name: "🤖 AI Workflow Board"
     filters:
       and:
-        - status != "archived"
+        - '!file.inFolder("TODO/Archive")'
         - or:
             - status == "ai-queue"
             - status == "needs-clarification"
             - summary.isTruthy()
+            - status == "archived"
     groupBy:
       property: status
       direction: ASC
@@ -54,6 +56,7 @@ views:
       - needs-clarification
       - in-progress
       - completed
+      - archived
     order:
       - file.name
       - category
