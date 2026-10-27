@@ -2,6 +2,7 @@ filters:
   and:
     - file.ext == "md"
     - type == "task"
+    - '!file.inFolder("Templates")'
 properties:
   status:
     displayName: Status

@@ -22,7 +22,7 @@ TABLE
     status AS "Status",
     category AS "Category",
     summary AS "Latest Summary"
-FROM ""
+FROM !"Templates"
 WHERE type = "task" AND updated >= date(today) - dur(2 days) AND status != "archived"
 SORT updated DESC
 ```
@@ -37,7 +37,7 @@ TABLE
     category AS "Category",
     question AS "Pending Question",
     summary AS "Latest Summary"
-FROM ""
+FROM !"Templates"
 WHERE type = "task" AND status = "needs-clarification"
 SORT updated DESC
 ```
@@ -51,7 +51,7 @@ TABLE
     priority AS "Priority",
     category AS "Category",
     created AS "Created"
-FROM ""
+FROM !"Templates"
 WHERE type = "task" AND status = "ai-queue"
 SORT priority DESC, updated DESC
 ```
