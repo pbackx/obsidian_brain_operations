@@ -2,7 +2,7 @@
 
 An autonomous overnight task operator powered by **[Google Antigravity](https://antigravity.google)** and **[Obsidian](https://obsidian.md)**.
 
-The system wakes up nightly during off-peak hours, synchronizes your vault via official Headless Obsidian Sync, discovers actionable tasks tagged with `#ai`, executes concrete steps toward your goals (scoping, technical research, or implementation), and maintains a single persistent **Living Dossier** per work item as durable long-term memory.
+The system wakes up nightly during off-peak hours, synchronizes your vault via official Headless Obsidian Sync, discovers actionable task notes queued in `status: ai-queue` on your **Obsidian Bases Kanban board** (`TODO/Tasks.base`), executes concrete steps toward your goals (scoping, technical research, or implementation), and updates each task note in-place as a persistent **Living Dossier**.
 
 ---
 
@@ -63,10 +63,21 @@ ob sync
 ```
 
 ### 4. Test Run
-Mark any task in your vault with `#ai`:
+Create a task note (or drag a card into the `ai-queue` column on `TODO/Tasks.base`):
 ```markdown
-- [ ] Evaluate vector databases for local LLMs #ai
-  - **User Note**: Focus on low-memory embedded options like SQLite-vec.
+---
+type: task
+status: ai-queue
+category: general
+priority: normal
+created: 2026-10-27
+updated: 2026-10-27
+---
+
+# Evaluate vector databases for local LLMs
+
+## Notes & Remarks
+- Focus on low-memory embedded options like SQLite-vec.
 ```
 
 Test task discovery:
@@ -361,7 +372,11 @@ brain_operations/
 │   ├── run_nightly.sh               # Master execution & sync runner
 │   └── vault_tool.py                # High-speed Python vault scanner & updater
 ├── templates/
-│   └── Dossier_Dashboard.md         # Dynamic Dataview dashboard for your vault
+│   ├── Dossier_Dashboard.md         # Dynamic dashboard embedding Tasks.base + Dataview
+│   ├── Task.md                      # Starter template for 1-file-per-task notes
+│   └── Tasks.base                   # Obsidian 1.14+ Base with Kanban & Table views
+├── tests/
+│   └── test_vault_and_freewrite.py  # Unit tests for vault_tool.py and freewrite_ingest.py
 ├── logs/                            # (Ignored) Timestamped execution logs
 ├── README.md                        # Documentation
 └── .gitignore                       # Git ignore rules

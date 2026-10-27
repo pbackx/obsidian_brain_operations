@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
 freewrite_ingest.py - Ingest drafts from Astrohaus Freewrite Postbox (Google Drive / NAS / local)
-into an Obsidian Vault and prepare actionable #ai tasks for the Nightly Operator.
+into an Obsidian Vault as 1-file-per-task notes compatible with Obsidian Bases & Kanban.
 
 Features:
 - Supports Postbox directory hierarchy (Postbox/A, Postbox/B, Postbox/C) or flat folders.
 - Parses .txt, .md, and .docx files natively using only the Python standard library
   (extracts paragraphs from .docx via zipfile + xml.etree.ElementTree with zero pip dependencies).
-- Normalizes ergonomic Freewrite task shorthand into standard Obsidian checkboxes:
-    * "- [ ] Task #ai"      -> kept as-is
-    * "- Task #ai"          -> "- [ ] Task #ai"
-    * "AI: Task"            -> "- [ ] Task #ai"
-    * "TODO: Task #ai"      -> "- [ ] Task #ai"
-    * Standalone "#ai" draft or draft in designated --ai-folders (e.g. Folder C)
-      -> wraps the note with a top-level "- [ ] Review Freewrite draft: <Title> #ai" task
-         so vault_tool.py and the nightly operator process the entire brain dump.
-- Idempotent SHA-256 state tracking (.freewrite_state.json) so source files in Google Drive
-  can remain untouched (preventing one-way Postbox sync conflicts) while avoiding duplicates.
+- Creates 1-file-per-task notes in `Freewrite/YYYY-MM-DD - <Title>.md` with YAML frontmatter:
+    * `type: task`
+    * `category: freewrite`
+    * `status: ai-queue` (when in designated `--ai-folders` like Folder B, or when `#ai` / `AI:` shorthand is present)
+      or `status: backlog` (for non-AI drafts).
+- Seamless follow-ups: if a previously processed Freewrite draft (`status: needs-clarification` or `completed`)
+  is edited on the Freewrite and synced again, appends `## Freewrite Follow-Up (YYYY-MM-DD HH:MM)` and resets
+  `status: ai-queue` in frontmatter so the nightly operator picks it up automatically.
+- Idempotent SHA-256 state tracking (`Brain_Operations/.freewrite_state.json`).
 """
 
 import argparse
@@ -25,19 +24,17 @@ import json
 import os
 import re
 import sys
-import zipfile
 import xml.etree.ElementTree as ET
+import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 SUPPORTED_EXTENSIONS = {'.txt', '.md', '.docx'}
 
 AI_TAG_REGEX = re.compile(r'#ai(?:/[a-zA-Z0-9_\-]+)?\b', re.IGNORECASE)
 CHECKBOX_REGEX = re.compile(r'^(\s*)- \[[ xX\t]\]\s+(.*)$')
-BULLET_AI_REGEX = re.compile(r'^(\s*)[-*]\s+(?!\[[ xX\t]\])(.+#ai(?:/[a-zA-Z0-9_\-]+)?\b.*)$', re.IGNORECASE)
 PREFIX_AI_REGEX = re.compile(r'^(\s*)(?:AI|TODO-AI|ASK-AI)\s*:\s*(.+)$', re.IGNORECASE)
-TODO_PREFIX_WITH_TAG_REGEX = re.compile(r'^(\s*)TODO\s*:\s*(.+#ai(?:/[a-zA-Z0-9_\-]+)?\b.*)$', re.IGNORECASE)
 STANDALONE_AI_LINE_REGEX = re.compile(r'^\s*#ai(?:/[a-zA-Z0-9_\-]+)?\s*$', re.IGNORECASE)
 
 
@@ -58,8 +55,6 @@ def extract_text_from_docx(file_path: Path) -> str:
                 return ""
             xml_bytes = zf.read('word/document.xml')
         root = ET.fromstring(xml_bytes)
-        # WordprocessingML namespace
-        ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
         for p in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
             texts: List[str] = []
             for elem in p.iter():
@@ -75,7 +70,6 @@ def extract_text_from_docx(file_path: Path) -> str:
         print(f"Warning: Failed to parse DOCX {file_path}: {e}", file=sys.stderr)
         return ""
 
-    # Collapse excessive blank paragraphs while preserving paragraph breaks
     cleaned: List[str] = []
     blank_count = 0
     for p in paragraphs:
@@ -103,7 +97,6 @@ def read_draft_content(file_path: Path) -> str:
 
 
 def sanitize_filename(name: str, max_length: int = 70) -> str:
-    # Strip markdown heading markers, tags, and invalid filesystem characters
     clean = re.sub(r'^#+\s*', '', name).strip()
     clean = AI_TAG_REGEX.sub('', clean).strip()
     clean = re.sub(r'^(?:AI|TODO-AI|ASK-AI|TODO)\s*:\s*', '', clean, flags=re.IGNORECASE).strip()
@@ -125,20 +118,18 @@ def derive_title_and_body(raw_text: str, fallback_stem: str) -> Tuple[str, str]:
     first_idx = non_empty_indices[0]
     first_line = lines[first_idx].strip()
 
-    # If the first line is a standalone "#ai" marker, look at the next non-empty line for title
     if STANDALONE_AI_LINE_REGEX.match(first_line) and len(non_empty_indices) > 1:
         second_idx = non_empty_indices[1]
         candidate = lines[second_idx].strip()
         title = sanitize_filename(candidate)
-        return title, raw_text
+        remaining_lines = [l for i, l in enumerate(lines) if i != first_idx]
+        return title, '\n'.join(remaining_lines).strip()
 
-    # If the first line is a markdown heading (# Title), use it as title and strip from body
     if first_line.startswith('#'):
         title = sanitize_filename(first_line)
         remaining = '\n'.join(lines[first_idx + 1:]).strip()
         return title, remaining if remaining else first_line
 
-    # If the first line is short (<= 80 chars) and followed by a blank line, treat as title
     if len(first_line) <= 80 and not CHECKBOX_REGEX.match(first_line) and not PREFIX_AI_REGEX.match(first_line):
         if len(lines) == first_idx + 1 or not lines[first_idx + 1].strip():
             title = sanitize_filename(first_line)
@@ -146,82 +137,33 @@ def derive_title_and_body(raw_text: str, fallback_stem: str) -> Tuple[str, str]:
             if remaining:
                 return title, remaining
 
-    # Otherwise derive title from first sentence/clause or filename
     first_sentence = re.split(r'[.!?]\s+', first_line, maxsplit=1)[0]
     title = sanitize_filename(first_sentence if len(first_sentence) >= 4 else fallback_stem)
     return title, raw_text
 
 
-def normalize_freewrite_tasks(body: str, title: str, force_ai_task: bool = False) -> Tuple[str, int]:
+def classify_freewrite_draft(body: str, force_ai_task: bool = False) -> Tuple[str, str, str, int]:
     """
-    Normalizes Freewrite shorthand into standard Obsidian '- [ ] ... #ai' checkboxes.
-    Returns (normalized_markdown_body, count_of_ai_tasks).
+    Determines whether a Freewrite draft should be queued for the nightly AI operator (`ai-queue`)
+    or placed in `backlog`. Also cleans standalone `#ai` lines.
+    Returns (cleaned_body, status, priority, ai_task_count).
     """
-    lines = body.split('\n')
-    out_lines: List[str] = []
-    ai_task_count = 0
-    has_any_ai_tag = bool(AI_TAG_REGEX.search(body))
-    standalone_ai_tags: List[str] = []
+    has_ai_tag = bool(AI_TAG_REGEX.search(body))
+    has_ai_prefix = any(PREFIX_AI_REGEX.match(line) for line in body.split('\n'))
+    is_focus = bool(re.search(r'#ai/focus\b', body, re.IGNORECASE))
 
-    for line in lines:
-        # 1. Existing checkbox with #ai
-        cb_match = CHECKBOX_REGEX.match(line)
-        if cb_match:
-            if AI_TAG_REGEX.search(line):
-                ai_task_count += 1
-            out_lines.append(line)
-            continue
+    lines = [l for l in body.split('\n') if not STANDALONE_AI_LINE_REGEX.match(l)]
+    cleaned_body = '\n'.join(lines).strip()
 
-        # 2. Standalone "#ai" or "#ai/focus" on its own line (used to tag an entire draft)
-        if STANDALONE_AI_LINE_REGEX.match(line):
-            standalone_ai_tags.append(line.strip())
-            continue
+    if force_ai_task or has_ai_tag or has_ai_prefix:
+        status = "ai-queue"
+        ai_tasks = 1
+    else:
+        status = "backlog"
+        ai_tasks = 0
 
-        # 3. Prefix shorthand: "AI: Do something"
-        prefix_match = PREFIX_AI_REGEX.match(line)
-        if prefix_match:
-            indent, task_text = prefix_match.group(1), prefix_match.group(2).strip()
-            if not AI_TAG_REGEX.search(task_text):
-                task_text = f"{task_text} #ai"
-            out_lines.append(f"{indent}- [ ] {task_text}")
-            ai_task_count += 1
-            continue
-
-        # 4. "TODO: something #ai"
-        todo_match = TODO_PREFIX_WITH_TAG_REGEX.match(line)
-        if todo_match:
-            indent, task_text = todo_match.group(1), todo_match.group(2).strip()
-            out_lines.append(f"{indent}- [ ] {task_text}")
-            ai_task_count += 1
-            continue
-
-        # 5. Bullet with #ai but without checkbox brackets: "- something #ai"
-        bullet_match = BULLET_AI_REGEX.match(line)
-        if bullet_match:
-            indent, task_text = bullet_match.group(1), bullet_match.group(2).strip()
-            out_lines.append(f"{indent}- [ ] {task_text}")
-            ai_task_count += 1
-            continue
-
-        out_lines.append(line)
-
-    normalized_body = '\n'.join(out_lines).strip()
-
-    # If the user tagged the draft as a whole (or wrote in a designated AI folder like Folder C)
-    # without creating a specific checkbox line, wrap the draft with a top-level #ai checkbox
-    # so vault_tool.py and obsidian-nightly-operator automatically triage the entire note.
-    if ai_task_count == 0 and (force_ai_task or has_any_ai_tag or standalone_ai_tags):
-        chosen_tag = standalone_ai_tags[0] if standalone_ai_tags else "#ai"
-        # Strip inline #ai from prose if we are promoting the whole draft to a top-level task,
-        # or keep it in prose; vault_tool.py only matches lines starting with `- [ ]`.
-        header_task = (
-            f"- [ ] Freewrite brain dump: {title} {chosen_tag}\n"
-            f"  - Drafted on the Freewrite Smart Typewriter. Full text below in this note."
-        )
-        normalized_body = f"{header_task}\n\n---\n\n{normalized_body}" if normalized_body else header_task
-        ai_task_count = 1
-
-    return normalized_body, ai_task_count
+    priority = "high" if is_focus else "normal"
+    return cleaned_body, status, priority, ai_tasks
 
 
 def detect_postbox_folder(source_root: Path, file_path: Path) -> str:
@@ -260,7 +202,7 @@ def ingest_directory(
     folders_filter: Optional[set] = None,
     ai_folders: Optional[set] = None,
     state_file: Optional[Path] = None,
-    dry_run: bool = False
+    dry_run: bool = False,
 ) -> List[Dict[str, Any]]:
     if state_file is None:
         state_file = vault_dir / "Brain_Operations" / ".freewrite_state.json"
@@ -293,7 +235,6 @@ def ingest_directory(
 
             prev_entry = tracked_files.get(rel_source_key)
             if prev_entry and prev_entry.get("sha256") == file_hash:
-                # Unchanged since last ingestion
                 continue
 
             raw_text = read_draft_content(fpath)
@@ -304,19 +245,18 @@ def ingest_directory(
             fname_date_match = re.match(r'^(\d{4}-\d{2}-\d{2})\b', fpath.stem)
             date_str = fname_date_match.group(1) if fname_date_match else mtime.strftime('%Y-%m-%d')
             iso_ts = mtime.strftime('%Y-%m-%d %H:%M')
+            today_str = datetime.now().strftime('%Y-%m-%d')
 
             title, body = derive_title_and_body(raw_text, fpath.stem)
             force_ai = bool(ai_folders and folder_slot.upper() in ai_folders)
-            normalized_body, ai_tasks = normalize_freewrite_tasks(body, title, force_ai_task=force_ai)
+            cleaned_body, status, priority, ai_tasks = classify_freewrite_draft(body, force_ai_task=force_ai)
 
-            # Determine target path in vault
             if prev_entry and prev_entry.get("vault_rel_path"):
                 vault_rel_path = prev_entry["vault_rel_path"]
                 target_file = vault_dir / vault_rel_path
             else:
                 safe_name = f"{date_str} - {title}.md"
                 target_file = target_base / safe_name
-                # Avoid colliding with a different source file
                 counter = 2
                 while target_file.exists() and (not prev_entry or prev_entry.get("vault_rel_path") != str(target_file.relative_to(vault_dir))):
                     target_file = target_base / f"{date_str} - {title} ({counter}).md"
@@ -325,37 +265,55 @@ def ingest_directory(
 
             note_markdown = (
                 f"---\n"
+                f"type: task\n"
+                f"status: {status}\n"
+                f"category: freewrite\n"
+                f"priority: {priority}\n"
                 f"title: \"{title}\"\n"
                 f"source: freewrite\n"
                 f"freewrite_folder: \"{folder_slot}\"\n"
                 f"freewrite_file: \"{rel_source_key}\"\n"
                 f"created: {date_str}\n"
+                f"updated: {date_str}\n"
                 f"synced: {iso_ts}\n"
                 f"---\n\n"
                 f"# {title}\n\n"
-                f"{normalized_body}\n"
+                f"## Original Freewrite Draft\n\n"
+                f"{cleaned_body}\n"
             )
 
             action = "created"
             if target_file.exists():
                 existing_content = target_file.read_text(encoding='utf-8', errors='replace')
-                # Check if the note was already processed by the nightly operator (#ai/done or #ai/question)
-                if re.search(r'#ai/(?:done|question)\b', existing_content, re.IGNORECASE):
-                    # Preserve the AI-updated header/links and append updated Freewrite content
+                if re.search(r'^status:\s*(?:completed|needs-clarification|in-progress|backlog)\b', existing_content, re.MULTILINE):
                     action = "updated_followup"
                     prev_raw = prev_entry.get("raw_text", "") if prev_entry else ""
                     new_addition = raw_text[len(prev_raw):].strip() if prev_raw and raw_text.startswith(prev_raw) else raw_text
                     if new_addition:
-                        # Re-open #ai/question (or #ai/done in AI folders / with #ai) -> #ai if user added follow-up remarks
-                        updated_existing = re.sub(r'#ai/question\b', '#ai', existing_content, flags=re.IGNORECASE)
-                        if force_ai or AI_TAG_REGEX.search(new_addition):
+                        updated_existing = existing_content
+                        if status == "ai-queue" or AI_TAG_REGEX.search(new_addition):
                             updated_existing = re.sub(
-                                r'^(\s*)- \[[xX \t]\](\s+.*?)#ai/done\b',
-                                r'\1- [ ]\2#ai',
+                                r'^status:\s*\S+',
+                                'status: ai-queue',
                                 updated_existing,
                                 count=1,
-                                flags=re.IGNORECASE | re.MULTILINE,
+                                flags=re.MULTILINE,
                             )
+                            ai_tasks = 1
+                        updated_existing = re.sub(
+                            r'^updated:\s*\S+',
+                            f'updated: {today_str}',
+                            updated_existing,
+                            count=1,
+                            flags=re.MULTILINE,
+                        )
+                        updated_existing = re.sub(
+                            r'^synced:\s*.*$',
+                            f'synced: {iso_ts}',
+                            updated_existing,
+                            count=1,
+                            flags=re.MULTILINE,
+                        )
                         note_markdown = (
                             f"{updated_existing.rstrip()}\n\n"
                             f"## Freewrite Follow-Up ({iso_ts})\n\n"
@@ -376,7 +334,7 @@ def ingest_directory(
                     "title": title,
                     "ai_tasks": ai_tasks,
                     "ingested_at": datetime.now().isoformat(timespec='seconds'),
-                    "raw_text": raw_text
+                    "raw_text": raw_text,
                 }
 
             results.append({
@@ -385,7 +343,8 @@ def ingest_directory(
                 "vault_file": vault_rel_path,
                 "folder": folder_slot,
                 "title": title,
-                "ai_tasks": ai_tasks
+                "status": status,
+                "ai_tasks": ai_tasks,
             })
 
     if not dry_run and results:
@@ -401,8 +360,8 @@ def main():
     parser.add_argument("--source", required=True, help="Path to local or mounted Postbox folder (containing A, B, C or draft files)")
     parser.add_argument("--vault", required=True, help="Path to local Obsidian vault")
     parser.add_argument("--subdir", default="Freewrite", help="Target subdirectory inside the Obsidian vault (default: Freewrite)")
-    parser.add_argument("--folders", default="", help="Comma-separated Postbox folders to ingest (e.g., 'A,B,C' or 'C'; default: all)")
-    parser.add_argument("--ai-folders", default="", help="Comma-separated Postbox folders where every draft is automatically queued as an #ai task even without an explicit #ai tag (e.g., 'C')")
+    parser.add_argument("--folders", default="", help="Comma-separated Postbox folders to ingest (e.g., 'A,B,C' or 'B'; default: all)")
+    parser.add_argument("--ai-folders", default="", help="Comma-separated Postbox folders where every draft is automatically queued with status: ai-queue (e.g., 'B')")
     parser.add_argument("--dry-run", action="store_true", help="Preview ingestion without writing files")
     parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
@@ -419,7 +378,7 @@ def main():
         vault_subdir=args.subdir,
         folders_filter=folders_filter,
         ai_folders=ai_folders,
-        dry_run=args.dry_run
+        dry_run=args.dry_run,
     )
 
     if args.json:
@@ -431,7 +390,7 @@ def main():
             mode_str = "[DRY-RUN] " if args.dry_run else ""
             print(f"{mode_str}Ingested {len(results)} Freewrite draft(s):")
             for r in results:
-                print(f"  - [{r['action'].upper()}] {r['source_file']} -> {r['vault_file']} (Folder: {r['folder']}, #ai tasks: {r['ai_tasks']})")
+                print(f"  - [{r['action'].upper()}] {r['source_file']} -> {r['vault_file']} (Folder: {r['folder']}, status: {r['status']})")
 
 
 if __name__ == "__main__":

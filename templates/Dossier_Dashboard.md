@@ -1,61 +1,57 @@
-# Brain Operations - Dossier Dashboard
+# Brain Operations - Task & Dossier Dashboard
 
 > **Overview:**  
-> This dashboard dynamically surfaces living dossiers generated and maintained by Antigravity.  
-> It updates automatically every time you open this note — **zero manual maintenance required**.
+> Every task is a 1-file-per-task Markdown note (`type: task`) across `TODO/`, `<Domain>/TODO/`, `Freewrite/`, and `TODO/Archive/`.  
+> Only tasks placed in **`status: ai-queue`** are picked up by the nightly agent.
 
 ---
 
-## 🕒 Dossiers Updated Recently (Last 48 Hours)
+## 🗂️ Master Obsidian Base & Kanban Board (`TODO/Tasks.base`)
+
+Open [[TODO/Tasks.base|Tasks.base]] directly for the full-width **Kanban Board**, or use the embedded Base view below (switch between *📋 All Active Kanban*, *🤖 AI Workflow Board*, *❓ Needs My Input*, domain tabs, and *📦 Archive* in the top-left view selector):
+
+![[TODO/Tasks.base]]
+
+---
+
+## 🕒 AI Tasks Updated Recently (Last 48 Hours)
 
 ```dataview
 TABLE
     updated AS "Updated Date",
     status AS "Status",
-    source_note AS "Source Note"
-FROM "Brain_Operations/Dossiers"
-WHERE updated >= date(today) - dur(2 days) AND file.folder = "Brain_Operations/Dossiers" AND !contains(file.path, "Archive")
+    category AS "Category",
+    summary AS "Latest Summary"
+FROM ""
+WHERE type = "task" AND updated >= date(today) - dur(2 days) AND status != "archived"
 SORT updated DESC
 ```
 
 ---
 
-## 📋 All Living Dossiers (Sorted by Recency)
+## ❓ Tasks Awaiting Your Input (`status: needs-clarification`)
 
 ```dataview
 TABLE
     updated AS "Last Active",
-    status AS "Status",
-    task AS "Original Task"
-FROM "Brain_Operations/Dossiers"
-WHERE file.folder = "Brain_Operations/Dossiers" AND !contains(file.path, "Archive")
+    category AS "Category",
+    question AS "Pending Question",
+    summary AS "Latest Summary"
+FROM ""
+WHERE type = "task" AND status = "needs-clarification"
 SORT updated DESC
 ```
 
 ---
 
-## ❓ Dossiers Awaiting User Clarification (`#ai/question`)
+## 🤖 Queued for Tonight's Nightly Run (`status: ai-queue`)
 
 ```dataview
 TABLE
-    updated AS "Last Active",
-    source_note AS "Source Note",
-    task AS "Original Task"
-FROM "Brain_Operations/Dossiers"
-WHERE status = "needs-clarification" AND file.folder = "Brain_Operations/Dossiers" AND !contains(file.path, "Archive")
-SORT updated DESC
-```
-
----
-
-## 📦 Archived Dossiers
-
-```dataview
-TABLE
-    updated AS "Last Active",
-    status AS "Status",
-    task AS "Original Task"
-FROM "Brain_Operations/Dossiers"
-WHERE contains(file.folder, "Archive")
-SORT updated DESC
+    priority AS "Priority",
+    category AS "Category",
+    created AS "Created"
+FROM ""
+WHERE type = "task" AND status = "ai-queue"
+SORT priority DESC, updated DESC
 ```

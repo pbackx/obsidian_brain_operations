@@ -1,0 +1,83 @@
+filters:
+  and:
+    - file.ext == "md"
+    - type == "task"
+properties:
+  status:
+    displayName: Status
+  category:
+    displayName: Category
+  priority:
+    displayName: Priority
+  updated:
+    displayName: Updated
+  created:
+    displayName: Created
+  summary:
+    displayName: Latest AI Summary
+  question:
+    displayName: Pending Question
+views:
+  - type: kanban
+    name: "📋 All Active Kanban"
+    filters:
+      and:
+        - status != "archived"
+    groupBy:
+      property: status
+      direction: ASC
+    groupOrder:
+      - backlog
+      - ai-queue
+      - needs-clarification
+      - in-progress
+      - completed
+    order:
+      - file.name
+      - category
+      - priority
+      - updated
+  - type: kanban
+    name: "🤖 AI Workflow Board"
+    filters:
+      and:
+        - status != "archived"
+        - or:
+            - status == "ai-queue"
+            - status == "needs-clarification"
+            - summary.isTruthy()
+    groupBy:
+      property: status
+      direction: ASC
+    groupOrder:
+      - ai-queue
+      - needs-clarification
+      - in-progress
+      - completed
+    order:
+      - file.name
+      - category
+      - updated
+      - question
+  - type: table
+    name: "❓ Needs My Input"
+    filters:
+      and:
+        - status == "needs-clarification"
+    order:
+      - file.name
+      - category
+      - question
+      - summary
+      - updated
+  - type: table
+    name: "📦 Archive"
+    filters:
+      or:
+        - status == "archived"
+        - file.inFolder("TODO/Archive")
+    order:
+      - file.name
+      - category
+      - updated
+      - summary

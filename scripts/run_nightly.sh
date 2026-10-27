@@ -144,9 +144,14 @@ if [[ "${FREEWRITE_ENABLED,,}" == "true" ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Step 2: Overview Scan & Live Quota Check
+# Step 2: Overview Scan, Archive Sweep & Live Quota Check
 # ------------------------------------------------------------------------------
-echo "[2/4] Scanning vault for pending #ai tasks..."
+echo "[2/4] Archiving any task notes marked status: archived -> TODO/Archive/..."
+python3 "$SCRIPT_DIR/vault_tool.py" archive --vault "$VAULT_LOCAL" || {
+    echo "WARNING: Archive sweep encountered an issue."
+}
+
+echo "[2a/4] Scanning vault for pending status: ai-queue tasks..."
 python3 "$SCRIPT_DIR/vault_tool.py" scan --vault "$VAULT_LOCAL" --limit "$MAX_TASKS"
 
 if [[ -f "$SCRIPT_DIR/check_quota.py" ]]; then
@@ -191,15 +196,15 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     TASK_JSON=$(python3 "$SCRIPT_DIR/vault_tool.py" next --vault "$VAULT_LOCAL" ${PROCESSED_IDS:+--exclude "$PROCESSED_IDS"})
 
     if [[ -z "$TASK_JSON" || "$TASK_JSON" == "null" || "$TASK_JSON" == "{}" ]]; then
-        echo "No more pending #ai tasks found tonight."
+        echo "No more pending status: ai-queue tasks found tonight."
         break
     fi
 
     # Parse task details safely
     TASK_ID=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('id', ''))" "$TASK_JSON")
     TASK_FILE=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('file', ''))" "$TASK_JSON")
-    TASK_LINE=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('line_number', ''))" "$TASK_JSON")
     TASK_TITLE=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('title', ''))" "$TASK_JSON")
+    TASK_CATEGORY=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('category', 'general'))" "$TASK_JSON")
 
     # Resolve model dynamically before each task based on live quota buckets
     SELECTED_MODEL=""
@@ -214,12 +219,12 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     fi
 
     echo ">>> [Task $i/$MAX_TASKS] Starting: $TASK_TITLE"
-    echo "    Location: $TASK_FILE (line $TASK_LINE)"
+    echo "    File:     $TASK_FILE (category: $TASK_CATEGORY)"
     echo "    ID:       $TASK_ID"
     echo "    Model:    ${SELECTED_MODEL:-default (--effort $EFFORT)}"
     echo "    Timeout:  ${CURRENT_TASK_TIMEOUT}s (Remaining nightly budget: ${REMAINING}s)"
 
-    TASK_PROMPT="Activate skill obsidian-nightly-operator. Vault directory is $VAULT_LOCAL. Write all output strictly in English. Process ONLY the single task at '$TASK_FILE' line $TASK_LINE. Ingest Brain_Operations/MEMORY.md if present. Advance the task, update or create its Living Dossier in Brain_Operations/Dossiers/, update the original note with vault_tool.py update (using --new-tag '#ai/done' or '#ai/question'), and append tonight's action to Brain_Operations/00_Nightly_Log.md."
+    TASK_PROMPT="Activate skill obsidian-nightly-operator. Vault directory is $VAULT_LOCAL. Write all output strictly in English. Process ONLY the single task note at '$TASK_FILE'. Ingest Brain_Operations/MEMORY.md if present. Advance the task, update '$TASK_FILE' in-place with your findings/architecture/activity log, run vault_tool.py update --file '$TASK_FILE' (setting --status 'completed' or 'needs-clarification'), and append tonight's action to Brain_Operations/00_Nightly_Log.md."
 
     TASK_START=$(date +%s)
     if agy -p "$TASK_PROMPT" \
