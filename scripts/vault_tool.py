@@ -29,6 +29,18 @@ AI_CALLOUT_REGEX = re.compile(
     r'(?:^>[ \t]*\[!(?:question|success|info|note)\][ \t]*Latest AI Update[^\n]*\n(?:^>[^\n]*\n)*\n*)',
     re.MULTILINE,
 )
+NOTES_SECTION_REGEX = re.compile(
+    r'^##[ \t]+(?:Notes & Remarks|Original Freewrite Draft)\b[^\n]*\n(.*?)(?=^---[ \t]*$|^##[ \t]+|\Z)',
+    re.MULTILINE | re.DOTALL | re.IGNORECASE,
+)
+FREEWRITE_FOLLOWUP_REGEX = re.compile(
+    r'^(##[ \t]+Freewrite Follow-Up[^\n]*\n.*?)(?=^---[ \t]*$|^##[ \t]+(?!Freewrite Follow-Up)|\Z)',
+    re.MULTILINE | re.DOTALL | re.IGNORECASE,
+)
+AI_HEADING_STOP_REGEX = re.compile(
+    r'^---[ \t]*$|^##[ \t]+(?:Objective|Current Architecture|Open Questions|Activity Log|\d+\.)',
+    re.MULTILINE | re.IGNORECASE,
+)
 
 STATUS_ALIASES = {
     '#ai/done': 'completed',
@@ -109,6 +121,37 @@ def compute_priority(priority_str: str, is_followup: bool) -> int:
     return score
 
 
+def extract_user_remarks(body: str) -> str:
+    """
+    Extracts the user's `## Notes & Remarks` (or `## Original Freewrite Draft`) section
+    at the top of the note, plus any `## Freewrite Follow-Up` sections, so the nightly
+    runner and agent can focus directly on the user's remarks and answers even when
+    the dossier below grows large.
+    """
+    cleaned = AI_CALLOUT_REGEX.sub('', body.lstrip('\r\n'))
+    parts: List[str] = []
+
+    notes_match = NOTES_SECTION_REGEX.search(cleaned)
+    if notes_match:
+        section_text = notes_match.group(1).strip()
+        if section_text:
+            parts.append(section_text)
+    else:
+        # Fallback for freshly created notes where the user wrote below # Title without a ## Notes & Remarks heading
+        without_h1 = re.sub(r'\A#\s+[^\n]+\n*', '', cleaned.lstrip('\r\n'))
+        stop_match = AI_HEADING_STOP_REGEX.search(without_h1)
+        top_text = (without_h1[:stop_match.start()] if stop_match else without_h1).strip()
+        if top_text:
+            parts.append(top_text)
+
+    for fw_match in FREEWRITE_FOLLOWUP_REGEX.finditer(cleaned):
+        fw_text = fw_match.group(1).strip()
+        if fw_text:
+            parts.append(fw_text)
+
+    return "\n\n".join(parts).strip()
+
+
 def scan_vault(vault_path: Path, excludes: Optional[set] = None, target_status: str = "ai-queue") -> List[Dict[str, Any]]:
     if excludes is None:
         excludes = DEFAULT_EXCLUDES
@@ -157,6 +200,7 @@ def scan_vault(vault_path: Path, excludes: Optional[set] = None, target_status: 
             priority_label = fm.get('priority', 'normal')
             is_followup = bool(fm.get('summary') or fm.get('question'))
             priority_score = compute_priority(priority_label, is_followup)
+            notes_and_remarks = extract_user_remarks(body)
             mtime = file_path.stat().st_mtime
 
             tasks.append({
@@ -168,10 +212,12 @@ def scan_vault(vault_path: Path, excludes: Optional[set] = None, target_status: 
                 'category': category,
                 'priority_label': priority_label,
                 'priority': priority_score,
+                'is_followup': is_followup,
                 'created': fm.get('created', ''),
                 'updated': fm.get('updated', ''),
                 'summary': fm.get('summary', ''),
                 'question': fm.get('question', ''),
+                'notes_and_remarks': notes_and_remarks,
                 '_mtime': mtime,
             })
 
@@ -331,10 +377,18 @@ def main():
             else:
                 print(f"Found {len(tasks)} '{args.status}' task(s) in {vault_path}:\n")
                 for t in tasks:
-                    print(f"[{t['priority']}] {t['file']} (category: {t['category']}, priority: {t['priority_label']})")
+                    followup_tag = " [FOLLOW-UP]" if t.get('is_followup') else ""
+                    print(f"[{t['priority']}] {t['file']} (category: {t['category']}, priority: {t['priority_label']}){followup_tag}")
                     print(f"     Title: {t['title']}")
                     if t['summary']:
                         print(f"     Previous Summary: {t['summary']}")
+                    if t['question']:
+                        print(f"     Previous Question: {t['question']}")
+                    if t.get('notes_and_remarks'):
+                        preview = t['notes_and_remarks'].replace('\n', ' | ')
+                        if len(preview) > 180:
+                            preview = preview[:177] + "..."
+                        print(f"     Notes & Remarks: {preview}")
                     print()
 
     elif args.command == "next":

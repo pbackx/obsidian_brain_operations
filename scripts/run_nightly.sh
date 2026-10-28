@@ -205,6 +205,7 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     TASK_FILE=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('file', ''))" "$TASK_JSON")
     TASK_TITLE=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('title', ''))" "$TASK_JSON")
     TASK_CATEGORY=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('category', 'general'))" "$TASK_JSON")
+    TASK_IS_FOLLOWUP=$(python3 -c "import sys, json; print('true' if json.loads(sys.argv[1]).get('is_followup') else 'false')" "$TASK_JSON")
 
     # Resolve model dynamically before each task based on live quota buckets
     SELECTED_MODEL=""
@@ -219,12 +220,53 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     fi
 
     echo ">>> [Task $i/$MAX_TASKS] Starting: $TASK_TITLE"
-    echo "    File:     $TASK_FILE (category: $TASK_CATEGORY)"
+    echo "    File:     $TASK_FILE (category: $TASK_CATEGORY, follow-up: $TASK_IS_FOLLOWUP)"
     echo "    ID:       $TASK_ID"
     echo "    Model:    ${SELECTED_MODEL:-default (--effort $EFFORT)}"
     echo "    Timeout:  ${CURRENT_TASK_TIMEOUT}s (Remaining nightly budget: ${REMAINING}s)"
 
-    TASK_PROMPT="Activate skill obsidian-nightly-operator. Vault directory is $VAULT_LOCAL. Write all output strictly in English. Process ONLY the single task note at '$TASK_FILE'. Ingest Brain_Operations/MEMORY.md if present. Advance the task, update '$TASK_FILE' in-place with your findings/architecture/activity log, run vault_tool.py update --file '$TASK_FILE' (setting --status 'completed' or 'needs-clarification'), and append tonight's action to Brain_Operations/00_Nightly_Log.md."
+    TASK_PROMPT=$(python3 -c '
+import sys, json
+t = json.loads(sys.argv[1])
+vault = sys.argv[2]
+f = t.get("file", "")
+is_followup = t.get("is_followup", False)
+summary = t.get("summary", "").strip()
+question = t.get("question", "").strip()
+remarks = t.get("notes_and_remarks", "").strip()
+
+lines = [
+    f"Activate skill obsidian-nightly-operator. Vault directory is {vault}. Write all output strictly in English.",
+    f"Process ONLY the single task note at '\''{f}'\''.",
+    "Ingest Brain_Operations/MEMORY.md if present.",
+]
+if is_followup:
+    lines.append("")
+    lines.append("=== HIGH-PRIORITY FOLLOW-UP DIRECTIVE ===")
+    lines.append("This task was previously processed and has been re-queued by the user with new remarks/answers in '\''## Notes & Remarks'\''.")
+    if summary:
+        lines.append(f"Previous AI Summary: {summary}")
+    if question:
+        lines.append(f"Previous Question Asked to User: {question}")
+    if remarks:
+        lines.append("User'\''s '\''## Notes & Remarks'\'' Section (focus especially on the newest/bottom items and how they answer the previous question or redirect the work):")
+        lines.append("<<<NOTES_AND_REMARKS")
+        lines.append(remarks)
+        lines.append("NOTES_AND_REMARKS>>>")
+    lines.append("Your #1 priority is to address the user'\''s newest remarks and answers in '\''## Notes & Remarks'\'' rather than repeating prior research.")
+    lines.append("=========================================")
+    lines.append("")
+elif remarks:
+    lines.append("")
+    lines.append("User'\''s '\''## Notes & Remarks'\'' Section:")
+    lines.append("<<<NOTES_AND_REMARKS")
+    lines.append(remarks)
+    lines.append("NOTES_AND_REMARKS>>>")
+    lines.append("")
+
+lines.append(f"Advance the task, update '\''{f}'\'' in-place with your findings/architecture/activity log (keeping '\''## Notes & Remarks'\'' intact at the top), run vault_tool.py update --file '\''{f}'\'' (setting --status '\''completed'\'' or '\''needs-clarification'\''), and append tonight'\''s action to Brain_Operations/00_Nightly_Log.md.")
+print("\n".join(lines))
+' "$TASK_JSON" "$VAULT_LOCAL")
 
     TASK_START=$(date +%s)
     if agy -p "$TASK_PROMPT" \
