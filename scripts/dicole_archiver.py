@@ -23,8 +23,11 @@ from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
+import shutil
+
 API_DATABASE_URL = "https://dicole.ai/api/database"
 DEFAULT_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+FFMPEG_BIN = Path.home() / ".local" / "bin" / "ffmpeg"
 
 
 def sanitize_filename(name: str) -> str:
@@ -133,32 +136,25 @@ def build_jellyfin_season_nfo(season_year: int, season_title: str, event_desc: s
 
 
 def format_plot_text(ai_data: dict, description: str = "") -> str:
-    """Format the Jellyfin episode plot with structured AI summary sections."""
-    lines = []
-    one_liner = ai_data.get("ai_one_liner")
-    summary = ai_data.get("ai_summary")
-    facts = ai_data.get("ai_facts")
-    habits = ai_data.get("ai_habits")
-    quotes = ai_data.get("ai_quotes") or ai_data.get("ai_top_quote")
+    """Format the Jellyfin episode plot with a concise, readable AI summary."""
+    summary = (ai_data.get("ai_summary") or "").strip()
+    one_liner = (ai_data.get("ai_one_liner") or "").strip()
 
+    lines = []
     if one_liner:
-        lines.append(f"Synopsis: {one_liner}\n")
+        lines.append(one_liner)
 
     if summary:
-        lines.append(f"Summary:\n{summary.strip()}\n")
+        bullet_lines = [l.strip() for l in summary.splitlines() if l.strip()]
+        formatted_bullets = "\n".join(
+            f"• {l}" if not l.startswith("•") and not l.startswith("-") else l
+            for l in bullet_lines
+        )
+        lines.append(formatted_bullets)
     elif description:
-        lines.append(f"Description:\n{description.strip()}\n")
+        lines.append(description.strip())
 
-    if facts:
-        lines.append(f"Key Takeaways & Facts:\n{facts.strip()}\n")
-
-    if habits:
-        lines.append(f"Protocols & Lifestyle Habits:\n{habits.strip()}\n")
-
-    if quotes:
-        lines.append(f"Notable Quotes:\n\"{quotes.strip()}\"\n")
-
-    return "\n".join(lines).strip()
+    return "\n\n".join(lines).strip()
 
 
 def build_jellyfin_episode_nfo(
@@ -281,6 +277,98 @@ tags: [{', '.join(tags)}]
     return yaml_header + body
 
 
+def fetch_vimeo_thumbnail(vimeo_url: str, output_path: Path) -> bool:
+    """Fetch the high-resolution official title slide thumbnail via Vimeo oEmbed."""
+    if output_path.exists() and output_path.stat().st_size > 10_000:
+        return True
+    m = re.search(r'/video/(\d+)', vimeo_url)
+    if not m:
+        return False
+    vid = m.group(1)
+    oembed_url = f"https://vimeo.com/api/oembed.json?url=https://player.vimeo.com/video/{vid}"
+    try:
+        req = urllib.request.Request(oembed_url, headers={"User-Agent": DEFAULT_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            raw_thumb = data.get("thumbnail_url", "")
+            if not raw_thumb:
+                return False
+            high_thumb = raw_thumb.split("_")[0] + "_1280.jpg"
+            req_img = urllib.request.Request(high_thumb, headers={"User-Agent": DEFAULT_USER_AGENT})
+            with urllib.request.urlopen(req_img, timeout=10) as ir, open(output_path, "wb") as f:
+                f.write(ir.read())
+            return True
+    except Exception as e:
+        try:
+            if "raw_thumb" in locals() and raw_thumb:
+                req_fallback = urllib.request.Request(raw_thumb, headers={"User-Agent": DEFAULT_USER_AGENT})
+                with urllib.request.urlopen(req_fallback, timeout=10) as ir, open(output_path, "wb") as f:
+                    f.write(ir.read())
+                return True
+        except Exception:
+            pass
+        print(f"[WARN] Could not fetch thumbnail for {vimeo_url}: {e}", file=sys.stderr)
+        return False
+
+
+def setup_summit_artwork(event: dict, show_dir: Path, season_dir: Path):
+    """Generate show & season level posters and fanart backgrounds."""
+    logo_url = event.get("event_logo")
+    if not logo_url:
+        return
+
+    cache_file = Path("/tmp") / f"event_logo_{event.get('id', 'default')}.jpg"
+    if not cache_file.exists():
+        try:
+            req = urllib.request.Request(logo_url, headers={"User-Agent": DEFAULT_USER_AGENT})
+            with urllib.request.urlopen(req, timeout=15) as resp, open(cache_file, "wb") as f:
+                f.write(resp.read())
+        except Exception as e:
+            print(f"[WARN] Failed downloading event logo: {e}", file=sys.stderr)
+            return
+
+    if not cache_file.exists() or not FFMPEG_BIN.exists():
+        return
+
+    show_poster = show_dir / "poster.jpg"
+    show_fanart = show_dir / "fanart.jpg"
+
+    # 1. Show Poster (1000x1500, 2:3 vertical crop centered on flask logo)
+    if not show_poster.exists():
+        cmd = [
+            str(FFMPEG_BIN), "-y", "-i", str(cache_file),
+            "-vf", "crop=ih*2/3:ih:(iw-ih*2/3)/2:0,scale=1000:1500:flags=lanczos",
+            str(show_poster)
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if show_poster.exists():
+            shutil.copyfile(show_poster, show_dir / "folder.jpg")
+
+    # 2. Show Fanart / Backdrop (1920x1080)
+    if not show_fanart.exists():
+        cmd = [
+            str(FFMPEG_BIN), "-y", "-i", str(cache_file),
+            "-vf", "scale=1920:1080:flags=lanczos",
+            str(show_fanart)
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if show_fanart.exists():
+            shutil.copyfile(show_fanart, show_dir / "backdrop.jpg")
+
+    # 3. Season Poster & Fanart
+    season_poster = season_dir / "poster.jpg"
+    season_fanart = season_dir / "fanart.jpg"
+
+    if show_poster.exists() and not season_poster.exists():
+        shutil.copyfile(show_poster, season_poster)
+        shutil.copyfile(show_poster, season_dir / "season-poster.jpg")
+        shutil.copyfile(show_poster, season_dir / "folder.jpg")
+
+    if show_fanart.exists() and not season_fanart.exists():
+        shutil.copyfile(show_fanart, season_fanart)
+        shutil.copyfile(show_fanart, season_dir / "backdrop.jpg")
+
+
 def download_video_yt_dlp(vimeo_url: str, output_path: Path, quality: str = None) -> bool:
     """Download video using yt-dlp with Vimeo referrer and high quality muxing."""
     if output_path.exists() and output_path.stat().st_size > 5_000_000:
@@ -298,6 +386,10 @@ def download_video_yt_dlp(vimeo_url: str, output_path: Path, quality: str = None
         "--referer", "https://dicole.ai/",
         "-f", quality_fmt,
         "--merge-output-format", "mp4",
+        "-N", "8",
+        "--retries", "10",
+        "--fragment-retries", "10",
+        "--no-mtime",
         "--no-playlist",
         "-o", str(temp_path),
         vimeo_url
@@ -377,6 +469,9 @@ def process_summit(
             season_nfo_path.write_text(build_jellyfin_season_nfo(season_year, season_name, event.get("description", "")), encoding="utf-8")
             print(f"[CREATED] {season_nfo_path}")
 
+        # Setup show & season artwork (posters, backdrops)
+        setup_summit_artwork(event, show_dir, season_dir)
+
     # Fetch program items
     items = query_dicole_db("program_items", columns="*", filters=[["eq", "event_id", event_id]])
     print(f"Discovered {len(items)} talks in event database.")
@@ -411,6 +506,7 @@ def process_summit(
 
         video_path = season_dir / f"{base_filename}.mp4"
         nfo_path = season_dir / f"{base_filename}.nfo"
+        thumb_path = season_dir / f"{base_filename}-thumb.jpg"
         obsidian_note_path = obsidian_summit_dir / f"S{season_year}E{idx:02d} - {clean_speaker} - {clean_title}.md"
 
         print(f"\n[{idx}/{len(items)}] {speaker} - {title}")
@@ -420,7 +516,11 @@ def process_summit(
         if dry_run:
             continue
 
-        # 1. Write Jellyfin Episode NFO
+        # 1. Fetch Episode Thumbnail
+        if vimeo_url and not thumb_path.exists():
+            fetch_vimeo_thumbnail(vimeo_url, thumb_path)
+
+        # 2. Write Jellyfin Episode NFO
         episode_nfo_content = build_jellyfin_episode_nfo(
             title=title,
             show_title="Biohacker Summit",
