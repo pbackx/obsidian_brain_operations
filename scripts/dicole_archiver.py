@@ -559,12 +559,16 @@ def download_video_yt_dlp(
     backdrop_path: Path = None,
 ) -> bool:
     """Download video using yt-dlp with Vimeo/YouTube support and +faststart MP4 muxing."""
-    if output_path.exists() and output_path.stat().st_size > 5_000_000:
+    if output_path.exists() and output_path.stat().st_size > 1_000_000:
         print(f"[SKIP] Video already exists: {output_path.name} ({output_path.stat().st_size / (1024*1024):.1f} MB)")
         return True
 
+    has_audio_fallback = bool(
+        presentation_url and re.search(r"\.(m4a|mp3|wav|aac)(\?|$)", presentation_url, re.IGNORECASE)
+    )
+
     if not video_url:
-        if presentation_url and re.search(r"\.(m4a|mp3|wav|aac)(\?|$)", presentation_url, re.IGNORECASE):
+        if has_audio_fallback:
             return mux_audio_presentation_to_mp4(presentation_url, backdrop_path, output_path)
         return False
 
@@ -612,7 +616,6 @@ def download_video_yt_dlp(
             return True
         else:
             print(f"[ERROR] Output file too small or missing after download: {temp_path}", file=sys.stderr)
-            return False
     except subprocess.CalledProcessError as e:
         out_tail = (e.stdout or "")[-500:]
         print(f"[ERROR] yt-dlp failed for {video_url}:\n{out_tail}", file=sys.stderr)
@@ -621,7 +624,11 @@ def download_video_yt_dlp(
                 stale.unlink()
             except OSError:
                 pass
-        return False
+
+    if has_audio_fallback:
+        print(f"[FALLBACK] Video download failed; muxing audio asset from {presentation_url}...", flush=True)
+        return mux_audio_presentation_to_mp4(presentation_url, backdrop_path, output_path)
+    return False
 
 
 def write_master_summits_overview(vault_dir: Path, summaries: list):
