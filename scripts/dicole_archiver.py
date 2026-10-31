@@ -171,16 +171,25 @@ def parse_summit_season_info(event: dict) -> dict:
 
 
 def extract_video_url(embed_code: str, presentation_url: str) -> str:
-    """Extract Vimeo or YouTube video stream URL from embed_code or presentation_url."""
+    """Extract Vimeo (preserving ?h= privacy hash if present) or YouTube video stream URL."""
     for src in (embed_code or "", presentation_url or ""):
         if not src:
             continue
-        m = re.search(r'src=["\'](https?://player\.vimeo\.com/video/\d+[^"\']*)["\']', src)
+        m = re.search(r'src=["\'](https?://player\.vimeo\.com/video/(\d+)[^"\']*)["\']', src)
         if m:
-            return m.group(1).split("?")[0]
-        m = re.search(r"vimeo\.com/(?:video/)?(\d+)", src)
+            raw_url = m.group(1).replace("&amp;", "&")
+            vid = m.group(2)
+            mh = re.search(r"[?&]h=([a-fA-F0-9]+)", raw_url)
+            if mh:
+                return f"https://player.vimeo.com/video/{vid}?h={mh.group(1)}"
+            return f"https://player.vimeo.com/video/{vid}"
+        m = re.search(r"vimeo\.com/(?:video/)?(\d+)(?:/([a-fA-F0-9]+)|\?h=([a-fA-F0-9]+))?", src)
         if m:
-            return f"https://player.vimeo.com/video/{m.group(1)}"
+            vid = m.group(1)
+            h_val = m.group(2) or m.group(3)
+            if h_val:
+                return f"https://player.vimeo.com/video/{vid}?h={h_val}"
+            return f"https://player.vimeo.com/video/{vid}"
         m = re.search(
             r"(?:youtube\.com/embed/|youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})",
             src,
@@ -380,10 +389,12 @@ def fetch_video_thumbnail(
         return True
 
     # 1. Vimeo oEmbed
-    m_vimeo = re.search(r"/video/(\d+)", video_url or "")
+    m_vimeo = re.search(r"/video/(\d+)(?:\?h=([a-fA-F0-9]+))?", video_url or "")
     if m_vimeo:
         vid = m_vimeo.group(1)
-        oembed_url = f"https://vimeo.com/api/oembed.json?url=https://player.vimeo.com/video/{vid}"
+        h_hash = m_vimeo.group(2)
+        target_vimeo = f"https://vimeo.com/{vid}/{h_hash}" if h_hash else f"https://player.vimeo.com/video/{vid}"
+        oembed_url = f"https://vimeo.com/api/oembed.json?url={target_vimeo}"
         raw_thumb = ""
         try:
             req = urllib.request.Request(oembed_url, headers={"User-Agent": DEFAULT_USER_AGENT})
@@ -610,8 +621,6 @@ def download_video_yt_dlp(
                 stale.unlink()
             except OSError:
                 pass
-        if presentation_url and re.search(r"\.(m4a|mp3|wav|aac)(\?|$)", presentation_url, re.IGNORECASE):
-            return mux_audio_presentation_to_mp4(presentation_url, backdrop_path, output_path)
         return False
 
 
