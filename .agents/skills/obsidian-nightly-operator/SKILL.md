@@ -26,8 +26,9 @@ You are an autonomous overnight operations agent. Your mission is to inspect the
      - **`completed`**: if the deliverable or requested action is finished.
      - **`needs-clarification`**: if waiting on user input, credentials, or an architectural decision.
    - **Never** leave a processed task in `ai-queue` or `in-progress`.
-4. **Top Callout & Frontmatter Summary (`vault_tool.py update`):**
-   - Running `vault_tool.py update` updates the YAML frontmatter (`status`, `updated: YYYY-MM-DD`, `summary`, `question`) so the latest summary and pending question are immediately visible in the `TODO/Tasks.base` Kanban and Table views, and refreshes the single `> [!question] Latest AI Update` or `> [!success] Latest AI Update` callout right beneath the `# <Title>` heading.
+4. **Top Callout, Frontmatter Summary & Emoji Cover (`vault_tool.py update`):**
+   - Running `vault_tool.py update` updates the YAML frontmatter (`status`, `updated: YYYY-MM-DD`, `summary`, `question`, `cover`) so the latest summary, pending question, and 4:1 (`480x120`, `0.25` aspect ratio) SVG emoji cover banner (`TODO/files/covers/<slug>.svg`) are immediately visible on the `Tasks.base` Kanban and Table views, and refreshes the single `> [!question] Latest AI Update` or `> [!success] Latest AI Update` callout right beneath the `# <Title>` heading.
+   - Pass `--emoji "<1-3 fitting emojis>"` (e.g. `--emoji "☀️ 🔌 🔋"`) when calling `vault_tool.py update` to customize the task's emoji banner (if omitted, `vault_tool.py` / `cover_tool.py` automatically selects 3 contextually relevant emojis if the card doesn't already have a local `.svg` cover).
 5. **Strict English Consistency:**
    - Write all generated content (research, plans, summaries, questions, and logs) **strictly in English**, even if the user's task title or remarks are in Dutch or another language.
 6. **Token & Scope Discipline (Clean Isolated Contexts):**
@@ -74,7 +75,8 @@ python3 scripts/vault_tool.py update \
   --vault "<VAULT_PATH>" \
   --file "<RELATIVE_FILE_PATH>" \
   --status "completed" \
-  --summary "Brief 1-sentence summary of completed work"
+  --summary "Brief 1-sentence summary of completed work" \
+  --emoji "<1-3 fitting emojis>"
 
 # If waiting on user input or decision:
 python3 scripts/vault_tool.py update \
@@ -82,7 +84,8 @@ python3 scripts/vault_tool.py update \
   --file "<RELATIVE_FILE_PATH>" \
   --status "needs-clarification" \
   --summary "Brief 1-sentence summary of tonight's progress" \
-  --question "Active clarifying question for the user"
+  --question "Active clarifying question for the user" \
+  --emoji "<1-3 fitting emojis>"
 ```
 
 ---

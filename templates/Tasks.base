@@ -3,6 +3,8 @@ filters:
     - file.ext == "md"
     - type == "task"
     - '!file.inFolder("Templates")'
+formulas:
+  card_cover: if(cover.isTruthy(), cover, if(status == "backlog", "", if(category == "home-automation", "#2a9d8f", if(category == "lego-ai", "#f4a261", if(category == "games", "#e76f51", if(category == "music", "#9b5de5", if(category == "language", "#e63946", if(category == "freewrite", "#6c757d", "#457b9d"))))))))
 properties:
   status:
     displayName: Status
@@ -63,6 +65,8 @@ views:
       - category
       - updated
       - question
+    image: formula.card_cover
+    imageAspectRatio: 0.25
   - type: table
     name: "❓ Needs My Input"
     filters:

@@ -154,8 +154,15 @@ python3 "$SCRIPT_DIR/vault_tool.py" archive --vault "$VAULT_LOCAL" || {
 echo "[2a/4] Scanning vault for pending status: ai-queue tasks..."
 python3 "$SCRIPT_DIR/vault_tool.py" scan --vault "$VAULT_LOCAL" --limit "$MAX_TASKS"
 
+if [[ -f "$SCRIPT_DIR/cover_tool.py" ]]; then
+    echo "[2b/4] Ensuring local SVG emoji covers for all cards on the AI Workflow Board..."
+    python3 "$SCRIPT_DIR/cover_tool.py" ensure --vault "$VAULT_LOCAL" || {
+        echo "WARNING: Cover ensure sweep encountered an issue."
+    }
+fi
+
 if [[ -f "$SCRIPT_DIR/check_quota.py" ]]; then
-    echo "[2b/4] Checking live Antigravity quota buckets..."
+    echo "[2c/4] Checking live Antigravity quota buckets..."
     python3 "$SCRIPT_DIR/check_quota.py" || {
         echo "WARNING: Quota check encountered an issue, continuing with default model settings."
     }
@@ -264,7 +271,7 @@ elif remarks:
     lines.append("NOTES_AND_REMARKS>>>")
     lines.append("")
 
-lines.append(f"Advance the task, update '\''{f}'\'' in-place with your findings/architecture/activity log (keeping '\''## Notes & Remarks'\'' intact at the top), run vault_tool.py update --file '\''{f}'\'' (setting --status '\''completed'\'' or '\''needs-clarification'\''), and append tonight'\''s action to Brain_Operations/00_Nightly_Log.md.")
+lines.append(f"Advance the task, update '\''{f}'\'' in-place with your findings/architecture/activity log (keeping '\''## Notes & Remarks'\'' intact at the top), run vault_tool.py update --file '\''{f}'\'' (setting --status '\''completed'\'' or '\''needs-clarification'\'', and optionally --emoji '\''<1-3 fitting emojis>'\''), and append tonight'\''s action to Brain_Operations/00_Nightly_Log.md.")
 print("\n".join(lines))
 ' "$TASK_JSON" "$VAULT_LOCAL")
 

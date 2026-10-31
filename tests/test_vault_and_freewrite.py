@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import freewrite_ingest
 import vault_tool
+import cover_tool
 
 
 class TestVaultToolAndFreewrite(unittest.TestCase):
@@ -156,6 +157,56 @@ class TestVaultToolAndFreewrite(unittest.TestCase):
         updated_text = vault_note.read_text(encoding="utf-8")
         self.assertIn("## Freewrite Follow-Up", updated_text)
         self.assertIn("Yes, please deploy on Proxmox.", updated_text)
+
+    def test_cover_tool_ensure_and_vault_tool_emoji_update(self):
+        # 1. Backlog card (must NOT get a cover from ensure_board_covers)
+        (self.vault / "TODO" / "Backlog Idea.md").write_text(
+            "---\ntype: task\nstatus: backlog\ncategory: general\n---\n\n# Backlog Idea\n",
+            encoding="utf-8",
+        )
+        # 2. Needs-clarification card on AI Workflow Board (must be backfilled)
+        solar_rel = "Home automation/TODO/Solis Inverter Modbus.md"
+        (self.vault / solar_rel).write_text(
+            "---\ntype: task\nstatus: needs-clarification\ncategory: home-automation\nsummary: \"Audited Modbus.\"\n---\n\n"
+            "# Solis Inverter Integration with Victron Battery via Modbus TCP\n",
+            encoding="utf-8",
+        )
+        # 3. Newly queued ai-queue card (must get a cover during nightly ensure sweep)
+        queue_rel = "TODO/Kanban Cover Test.md"
+        (self.vault / queue_rel).write_text(
+            "---\ntype: task\nstatus: ai-queue\ncategory: general\n---\n\n# Kanban Task Board Image Property\n",
+            encoding="utf-8",
+        )
+
+        updated = cover_tool.ensure_board_covers(self.vault)
+        self.assertEqual(len(updated), 2)
+
+        # Backlog card remains untouched
+        backlog_fm, _, _ = vault_tool.parse_frontmatter((self.vault / "TODO" / "Backlog Idea.md").read_text(encoding="utf-8"))
+        self.assertNotIn("cover", backlog_fm)
+
+        # Solar card has local SVG cover
+        solar_fm, _, _ = vault_tool.parse_frontmatter((self.vault / solar_rel).read_text(encoding="utf-8"))
+        self.assertEqual(solar_fm["cover"], "[[TODO/files/covers/solis-inverter-modbus.svg]]")
+        svg_path = self.vault / "TODO/files/covers/solis-inverter-modbus.svg"
+        self.assertTrue(svg_path.exists())
+        svg_text = svg_path.read_text(encoding="utf-8")
+        self.assertIn('viewBox="0 0 480 120"', svg_text)
+        self.assertIn("#2a9d8f", svg_text)
+
+        # Updating a note with explicit --emoji overrides the cover SVG
+        vault_tool.update_task_note(
+            self.vault,
+            queue_rel,
+            new_status="completed",
+            summary_text="Implemented local SVG emoji covers.",
+            emoji_text="📋 🎨 ✨",
+        )
+        queue_fm, _, _ = vault_tool.parse_frontmatter((self.vault / queue_rel).read_text(encoding="utf-8"))
+        self.assertEqual(queue_fm["cover"], "[[TODO/files/covers/kanban-cover-test.svg]]")
+        queue_svg = (self.vault / "TODO/files/covers/kanban-cover-test.svg").read_text(encoding="utf-8")
+        self.assertIn("📋", queue_svg)
+        self.assertIn("🎨", queue_svg)
 
 
 if __name__ == "__main__":

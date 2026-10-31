@@ -233,9 +233,13 @@ def update_task_note(
     new_status: str,
     summary_text: str,
     question_text: Optional[str] = None,
+    emoji_text: Optional[str] = None,
+    cover_text: Optional[str] = None,
 ) -> bool:
     """
     Updates a task note's YAML frontmatter and top Latest AI Update callout in-place.
+    Automatically generates/assigns a local SVG emoji cover banner if `--emoji` is passed
+    or if the note does not yet have a local `.svg` cover.
     """
     abs_path = vault_path / rel_file
     if not abs_path.exists():
@@ -266,6 +270,34 @@ def update_task_note(
         updates['question'] = yaml_quote(question_text)
     else:
         updates['question'] = None
+
+    # Handle cover generation / assignment
+    if cover_text:
+        updates['cover'] = yaml_quote(cover_text)
+        updates['cover_credit'] = None
+    else:
+        try:
+            import cover_tool
+            if emoji_text or not cover_tool.has_local_svg_cover(vault_path, fm):
+                h1_match_title = H1_REGEX.search(body)
+                title = fm.get('title') or (h1_match_title.group(1).strip() if h1_match_title else abs_path.stem)
+                category = fm.get('category', 'general')
+                remarks = extract_user_remarks(body)
+                if emoji_text:
+                    emojis = cover_tool.split_emoji_clusters(emoji_text)
+                else:
+                    emojis = cover_tool.pick_emojis(
+                        title=title,
+                        category=category,
+                        summary=summary_text,
+                        remarks=remarks,
+                    )
+                slug = cover_tool.slugify(abs_path.stem)
+                rel_svg = cover_tool.generate_cover_file(vault_path, slug=slug, emojis=emojis, category=category)
+                updates['cover'] = yaml_quote(f"[[{rel_svg}]]")
+                updates['cover_credit'] = None
+        except Exception as e:
+            print(f"Warning: Could not generate cover for {rel_file}: {e}", file=sys.stderr)
 
     new_fm_str = build_frontmatter(fm_lines, updates)
 
@@ -356,6 +388,12 @@ def main():
     update_parser.add_argument("--new-tag", default=None, help="Deprecated alias for --status")
     update_parser.add_argument("--summary", required=True, help="Consolidated 1-sentence status summary")
     update_parser.add_argument("--question", default=None, help="Optional active clarifying question for the user")
+    update_parser.add_argument(
+        "--emoji",
+        default=None,
+        help="Optional 1-3 emojis (e.g. '☀️ 🔌 🔋') to render a local SVG cover banner (auto-picked if omitted)",
+    )
+    update_parser.add_argument("--cover", default=None, help="Optional explicit cover value (e.g. '[[TODO/files/covers/foo.svg]]')")
 
     # archive subcommand
     archive_parser = subparsers.add_parser("archive", help="Move status: archived task notes into TODO/Archive/")
@@ -414,6 +452,8 @@ def main():
             new_status=chosen_status,
             summary_text=args.summary,
             question_text=args.question,
+            emoji_text=args.emoji,
+            cover_text=args.cover,
         )
         if success:
             print(f"Successfully updated {args.file} (status={STATUS_ALIASES.get(chosen_status.lower(), chosen_status.lower())})")
