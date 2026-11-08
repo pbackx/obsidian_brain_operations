@@ -133,6 +133,9 @@ def parse_protobuf(raw_bytes: bytes) -> Dict[str, Any]:
     if client_pb2 is None:
         raise ImportError("client_pb2 module not found. Compile client.proto first.")
 
+    if raw_bytes.startswith(b"PPPBV1"):
+        raw_bytes = raw_bytes[6:]
+
     client = client_pb2.PClient()
     client.ParseFromString(raw_bytes)
 
