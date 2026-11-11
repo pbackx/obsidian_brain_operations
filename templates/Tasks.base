@@ -4,7 +4,7 @@ filters:
     - type == "task"
     - '!file.inFolder("Templates")'
 formulas:
-  card_cover: if(cover.isTruthy(), cover, if(status == "backlog", "", if(category == "home-automation", "#2a9d8f", if(category == "lego-ai", "#f4a261", if(category == "games", "#e76f51", if(category == "music", "#9b5de5", if(category == "language", "#e63946", if(category == "freewrite", "#6c757d", "#457b9d"))))))))
+  card_cover: if(cover.isTruthy(), cover, if(status == "backlog", "", if(category == "home-automation", "#2a9d8f", if(category == "finance", "#16a34a", if(category == "lego-ai", "#f4a261", if(category == "games", "#e76f51", if(category == "music", "#9b5de5", if(category == "language", "#e63946", if(category == "freewrite", "#6c757d", "#457b9d")))))))))
 properties:
   status:
     displayName: Status
@@ -77,6 +77,28 @@ views:
       - category
       - question
       - summary
+      - updated
+  - type: kanban
+    name: "💶 Finance"
+    filters:
+      and:
+        - or:
+            - file.inFolder("Finance/TODO")
+            - category == "finance"
+        - '!file.inFolder("TODO/Archive")'
+    groupBy:
+      property: status
+      direction: ASC
+    groupOrder:
+      - backlog
+      - ai-queue
+      - needs-clarification
+      - in-progress
+      - completed
+      - archived
+    order:
+      - file.name
+      - priority
       - updated
   - type: table
     name: "📦 Archive"

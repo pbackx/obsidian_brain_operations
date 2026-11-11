@@ -194,6 +194,11 @@ class TestVaultToolAndFreewrite(unittest.TestCase):
         self.assertIn('viewBox="0 0 480 120"', svg_text)
         self.assertIn("#2a9d8f", svg_text)
 
+        # Finance category cover test
+        fin_svg = cover_tool.render_emoji_banner_svg(["💶", "📈", "💰"], category="finance")
+        self.assertIn("#16a34a", fin_svg)
+        self.assertIn("#14532d", fin_svg)
+
         # Updating a note with explicit --emoji overrides the cover SVG
         vault_tool.update_task_note(
             self.vault,

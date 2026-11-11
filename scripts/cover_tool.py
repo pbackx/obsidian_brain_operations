@@ -30,6 +30,7 @@ SVG_HEIGHT = 120
 # Category gradient palettes aligned with Tasks.base category strip colors
 CATEGORY_PALETTES: Dict[str, Tuple[str, str, str]] = {
     "home-automation": ("#0f766e", "#2a9d8f", "#14b8a6"),
+    "finance": ("#14532d", "#16a34a", "#4ade80"),
     "lego-ai": ("#b45309", "#f4a261", "#f59e0b"),
     "games": ("#991b1b", "#e76f51", "#f97316"),
     "music": ("#5b21b6", "#9b5de5", "#c084fc"),
@@ -40,6 +41,7 @@ CATEGORY_PALETTES: Dict[str, Tuple[str, str, str]] = {
 
 CATEGORY_DEFAULT_EMOJIS: Dict[str, List[str]] = {
     "home-automation": ["🏠", "⚡", "📡"],
+    "finance": ["💶", "📈", "💰"],
     "lego-ai": ["🧱", "🤖", "⚙️"],
     "games": ["🎮", "🕹️", "🏆"],
     "music": ["🎵", "🎹", "🎧"],

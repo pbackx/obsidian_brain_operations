@@ -96,7 +96,7 @@ python3 scripts/vault_tool.py update \
 ---
 type: task
 status: needs-clarification | completed
-category: general | home-automation | lego-ai | games | music | language | freewrite
+category: general | home-automation | finance | lego-ai | games | music | language | freewrite
 priority: normal | high | low
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
