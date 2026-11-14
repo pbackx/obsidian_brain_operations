@@ -41,6 +41,8 @@ MAX_TASKS="${MAX_TASKS:-3}"
 EFFORT="${EFFORT:-high}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10800}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-1800}"
+MIN_TASK_TIMEOUT="${MIN_TASK_TIMEOUT:-120}"
+MAX_TASK_TIMEOUT="${MAX_TASK_TIMEOUT:-7200}"
 
 # Quota-aware model routing & automatic fallback settings
 QUOTA_AUTO_DOWNGRADE="${QUOTA_AUTO_DOWNGRADE:-true}"
@@ -73,7 +75,7 @@ echo " Sync Method:   $SYNC_METHOD"
 echo " Node Version:  $(command -v node >/dev/null && node -v || echo 'Not found')"
 echo " Obsidian CLI:  $(command -v ob >/dev/null && echo 'Ready' || echo 'Not installed / not in PATH')"
 echo " Max Tasks:     $MAX_TASKS"
-echo " Time Budget:   ${TIMEOUT_SECONDS}s total (max ${TASK_TIMEOUT}s per task)"
+echo " Time Budget:   ${TIMEOUT_SECONDS}s total (default ${TASK_TIMEOUT}s/task, max ${MAX_TASK_TIMEOUT}s/task)"
 echo " Effort:        $EFFORT"
 echo " Auto Fallback: $QUOTA_AUTO_DOWNGRADE (Primary: $PRIMARY_MODEL, Argon Reserve: ${ARGON_RESERVE_PCT}%)"
 echo " Log File:      $LOG_FILE"
@@ -191,11 +193,6 @@ for ((i=1; i<=MAX_TASKS; i++)); do
         break
     fi
 
-    CURRENT_TASK_TIMEOUT="$TASK_TIMEOUT"
-    if (( REMAINING < CURRENT_TASK_TIMEOUT )); then
-        CURRENT_TASK_TIMEOUT="$REMAINING"
-    fi
-
     echo "------------------------------------------------------------"
     echo " Locating next prioritized task ($i/$MAX_TASKS) | Budget: ${ELAPSED}s / ${TIMEOUT_SECONDS}s used"
     echo "------------------------------------------------------------"
@@ -213,6 +210,29 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     TASK_TITLE=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('title', ''))" "$TASK_JSON")
     TASK_CATEGORY=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('category', 'general'))" "$TASK_JSON")
     TASK_IS_FOLLOWUP=$(python3 -c "import sys, json; print('true' if json.loads(sys.argv[1]).get('is_followup') else 'false')" "$TASK_JSON")
+    TASK_TIMEOUT_RAW=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('timeout') or '')" "$TASK_JSON")
+    TASK_CUSTOM_TIMEOUT=$(python3 -c "import sys, json; v = json.loads(sys.argv[1]).get('timeout_seconds'); print(v if isinstance(v, int) and v > 0 else '')" "$TASK_JSON")
+
+    # Resolve per-task timeout (frontmatter override vs default TASK_TIMEOUT) with safety bounds
+    if [[ -n "$TASK_CUSTOM_TIMEOUT" ]]; then
+        CURRENT_TASK_TIMEOUT="$TASK_CUSTOM_TIMEOUT"
+        TIMEOUT_SOURCE="frontmatter override: ${TASK_TIMEOUT_RAW}"
+    else
+        CURRENT_TASK_TIMEOUT="$TASK_TIMEOUT"
+        TIMEOUT_SOURCE="default"
+    fi
+    if (( CURRENT_TASK_TIMEOUT < MIN_TASK_TIMEOUT )); then
+        CURRENT_TASK_TIMEOUT="$MIN_TASK_TIMEOUT"
+        TIMEOUT_SOURCE="${TIMEOUT_SOURCE}, clamped to min ${MIN_TASK_TIMEOUT}s"
+    fi
+    if (( CURRENT_TASK_TIMEOUT > MAX_TASK_TIMEOUT )); then
+        CURRENT_TASK_TIMEOUT="$MAX_TASK_TIMEOUT"
+        TIMEOUT_SOURCE="${TIMEOUT_SOURCE}, capped at max ${MAX_TASK_TIMEOUT}s"
+    fi
+    if (( REMAINING < CURRENT_TASK_TIMEOUT )); then
+        CURRENT_TASK_TIMEOUT="$REMAINING"
+        TIMEOUT_SOURCE="${TIMEOUT_SOURCE}, capped at remaining nightly budget"
+    fi
 
     # Resolve model dynamically before each task based on live quota buckets
     SELECTED_MODEL=""
@@ -230,12 +250,14 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     echo "    File:     $TASK_FILE (category: $TASK_CATEGORY, follow-up: $TASK_IS_FOLLOWUP)"
     echo "    ID:       $TASK_ID"
     echo "    Model:    ${SELECTED_MODEL:-default (--effort $EFFORT)}"
-    echo "    Timeout:  ${CURRENT_TASK_TIMEOUT}s (Remaining nightly budget: ${REMAINING}s)"
+    echo "    Timeout:  ${CURRENT_TASK_TIMEOUT}s (${TIMEOUT_SOURCE} | Remaining nightly budget: ${REMAINING}s)"
 
     TASK_PROMPT=$(python3 -c '
 import sys, json
 t = json.loads(sys.argv[1])
 vault = sys.argv[2]
+timeout_sec = int(sys.argv[3])
+timeout_min = round(timeout_sec / 60, 1)
 f = t.get("file", "")
 is_followup = t.get("is_followup", False)
 summary = t.get("summary", "").strip()
@@ -246,6 +268,7 @@ lines = [
     f"Activate skill obsidian-nightly-operator. Vault directory is {vault}. Write all output strictly in English.",
     f"Process ONLY the single task note at '\''{f}'\''.",
     "Ingest Brain_Operations/MEMORY.md if present.",
+    f"Time Budget: You have a hard timeout of {timeout_sec}s (~{timeout_min:g} minutes) for this task. Reserve the final 3-4 minutes to commit/push any code changes, update the task note via vault_tool.py, and append to Brain_Operations/00_Nightly_Log.md so you never get cut off mid-wrap-up.",
 ]
 if is_followup:
     lines.append("")
@@ -273,7 +296,7 @@ elif remarks:
 
 lines.append(f"Advance the task, update '\''{f}'\'' in-place with your findings/architecture/activity log (keeping '\''## Notes & Remarks'\'' intact at the top), run vault_tool.py update --file '\''{f}'\'' (setting --status '\''completed'\'' or '\''needs-clarification'\'', and optionally --emoji '\''<1-3 fitting emojis>'\''), and append tonight'\''s action to Brain_Operations/00_Nightly_Log.md.")
 print("\n".join(lines))
-' "$TASK_JSON" "$VAULT_LOCAL")
+' "$TASK_JSON" "$VAULT_LOCAL" "$CURRENT_TASK_TIMEOUT")
 
     TASK_START=$(date +%s)
     if agy -p "$TASK_PROMPT" \

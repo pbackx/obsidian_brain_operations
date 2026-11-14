@@ -121,6 +121,56 @@ def compute_priority(priority_str: str, is_followup: bool) -> int:
     return score
 
 
+TIMEOUT_TOKEN_REGEX = re.compile(
+    r'(\d+(?:\.\d+)?)\s*(hours?|hrs?|hr|h|minutes?|mins?|min|m|seconds?|secs?|sec|s)(?=\s|\d|$)',
+    re.IGNORECASE,
+)
+
+
+def parse_timeout_seconds(raw_val: str) -> Optional[int]:
+    """
+    Parses a frontmatter `timeout` value into integer seconds.
+    - Plain numbers without units (e.g. `45`, `120`) are interpreted as minutes.
+    - Supports unit suffixes (`45m`, `2h`, `1.5h`, `1800s`) and compound values (`1h30m`, `1h 30m`).
+    Returns None if empty or invalid.
+    """
+    if not raw_val:
+        return None
+    s = str(raw_val).strip()
+    if not s:
+        return None
+
+    # Plain number without unit -> minutes
+    if re.fullmatch(r'\d+(?:\.\d+)?', s):
+        secs = int(round(float(s) * 60))
+        return secs if secs > 0 else None
+
+    # Check if the entire string is made of valid number+unit tokens
+    tokens = list(TIMEOUT_TOKEN_REGEX.finditer(s))
+    if not tokens:
+        print(f"Warning: Unrecognized timeout format '{raw_val}', ignoring.", file=sys.stderr)
+        return None
+
+    remainder = TIMEOUT_TOKEN_REGEX.sub('', s).strip()
+    if remainder:
+        print(f"Warning: Unrecognized trailing text in timeout '{raw_val}', ignoring.", file=sys.stderr)
+        return None
+
+    total_seconds = 0.0
+    for match in tokens:
+        num = float(match.group(1))
+        unit = match.group(2).lower()
+        if unit.startswith('h'):
+            total_seconds += num * 3600.0
+        elif unit.startswith('m'):
+            total_seconds += num * 60.0
+        elif unit.startswith('s'):
+            total_seconds += num
+
+    result = int(round(total_seconds))
+    return result if result > 0 else None
+
+
 def extract_user_remarks(body: str) -> str:
     """
     Extracts the user's `## Notes & Remarks` (or `## Original Freewrite Draft`) section
@@ -201,6 +251,8 @@ def scan_vault(vault_path: Path, excludes: Optional[set] = None, target_status: 
             is_followup = bool(fm.get('summary') or fm.get('question'))
             priority_score = compute_priority(priority_label, is_followup)
             notes_and_remarks = extract_user_remarks(body)
+            timeout_raw = fm.get('timeout', '').strip()
+            timeout_seconds = parse_timeout_seconds(timeout_raw)
             mtime = file_path.stat().st_mtime
 
             tasks.append({
@@ -213,6 +265,8 @@ def scan_vault(vault_path: Path, excludes: Optional[set] = None, target_status: 
                 'priority_label': priority_label,
                 'priority': priority_score,
                 'is_followup': is_followup,
+                'timeout': timeout_raw,
+                'timeout_seconds': timeout_seconds,
                 'created': fm.get('created', ''),
                 'updated': fm.get('updated', ''),
                 'summary': fm.get('summary', ''),
@@ -235,6 +289,7 @@ def update_task_note(
     question_text: Optional[str] = None,
     emoji_text: Optional[str] = None,
     cover_text: Optional[str] = None,
+    timeout_text: Optional[str] = None,
 ) -> bool:
     """
     Updates a task note's YAML frontmatter and top Latest AI Update callout in-place.
@@ -270,6 +325,10 @@ def update_task_note(
         updates['question'] = yaml_quote(question_text)
     else:
         updates['question'] = None
+
+    if timeout_text is not None:
+        cleaned_timeout = timeout_text.strip()
+        updates['timeout'] = cleaned_timeout if cleaned_timeout else None
 
     # Handle cover generation / assignment
     if cover_text:
@@ -394,6 +453,11 @@ def main():
         help="Optional 1-3 emojis (e.g. '☀️ 🔌 🔋') to render a local SVG cover banner (auto-picked if omitted)",
     )
     update_parser.add_argument("--cover", default=None, help="Optional explicit cover value (e.g. '[[TODO/files/covers/foo.svg]]')")
+    update_parser.add_argument(
+        "--timeout",
+        default=None,
+        help="Optional per-task timeout override (e.g. '45m', '2h', '90'; pass '' to remove)",
+    )
 
     # archive subcommand
     archive_parser = subparsers.add_parser("archive", help="Move status: archived task notes into TODO/Archive/")
@@ -416,7 +480,8 @@ def main():
                 print(f"Found {len(tasks)} '{args.status}' task(s) in {vault_path}:\n")
                 for t in tasks:
                     followup_tag = " [FOLLOW-UP]" if t.get('is_followup') else ""
-                    print(f"[{t['priority']}] {t['file']} (category: {t['category']}, priority: {t['priority_label']}){followup_tag}")
+                    timeout_tag = f", timeout: {t['timeout']} ({t['timeout_seconds']}s)" if t.get('timeout_seconds') else ""
+                    print(f"[{t['priority']}] {t['file']} (category: {t['category']}, priority: {t['priority_label']}{timeout_tag}){followup_tag}")
                     print(f"     Title: {t['title']}")
                     if t['summary']:
                         print(f"     Previous Summary: {t['summary']}")
@@ -454,6 +519,7 @@ def main():
             question_text=args.question,
             emoji_text=args.emoji,
             cover_text=args.cover,
+            timeout_text=args.timeout,
         )
         if success:
             print(f"Successfully updated {args.file} (status={STATUS_ALIASES.get(chosen_status.lower(), chosen_status.lower())})")
