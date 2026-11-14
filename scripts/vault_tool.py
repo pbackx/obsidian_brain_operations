@@ -18,7 +18,7 @@ import os
 import re
 import shutil
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -419,6 +419,122 @@ def archive_tasks(vault_path: Path, dry_run: bool = False) -> List[Dict[str, str
     return moved
 
 
+LOG_SECTION_SPLIT_REGEX = re.compile(
+    r'(?m)^(?:---[ \t]*\r?\n+)*(?=##[ \t]+(?:Run:[ \t]+)?\d{4}-\d{2}-\d{2}\b)'
+)
+LOG_DATE_HEADING_REGEX = re.compile(
+    r'^##[ \t]+(?:Run:[ \t]+)?(\d{4}-\d{2}-\d{2})\b[^\n]*',
+    re.MULTILINE,
+)
+
+
+def rotate_nightly_log(vault_path: Path, keep_days: int = 14, dry_run: bool = False) -> Dict[str, Any]:
+    """
+    Rotates dated sections (`## YYYY-MM-DD` or `## Run: YYYY-MM-DD`) older than `keep_days`
+    out of `Brain_Operations/00_Nightly_Log.md` into yearly cold-storage archive files
+    at `Brain_Operations/Archive/Nightly_Log_<YYYY>.md`.
+    """
+    log_path = vault_path / "Brain_Operations" / "00_Nightly_Log.md"
+    result: Dict[str, Any] = {
+        'rotated_count': 0,
+        'kept_count': 0,
+        'rotated_dates': [],
+        'archive_files': [],
+    }
+    if not log_path.exists():
+        return result
+
+    content = log_path.read_text(encoding='utf-8', errors='replace')
+    cutoff_date = (datetime.now().date() - timedelta(days=keep_days)).strftime('%Y-%m-%d')
+
+    # Locate the start of each dated section (including any immediately preceding `---` line)
+    starts = [m.start() for m in LOG_SECTION_SPLIT_REGEX.finditer(content)]
+    if not starts:
+        return result
+
+    kept_sections: List[str] = []
+    rotated_by_year: Dict[str, List[Tuple[str, str, str]]] = {}
+
+    for idx, start in enumerate(starts):
+        end = starts[idx + 1] if idx + 1 < len(starts) else len(content)
+        raw_section = content[start:end]
+        # Strip leading `---` dividers so we can normalize section spacing cleanly
+        cleaned_section = re.sub(r'\A(?:---[ \t]*\r?\n+)+', '', raw_section).strip()
+        m_date = LOG_DATE_HEADING_REGEX.search(cleaned_section)
+        if not m_date:
+            kept_sections.append(cleaned_section)
+            continue
+
+        date_str = m_date.group(1)
+        heading_line = m_date.group(0).strip()
+        if date_str < cutoff_date:
+            year = date_str[:4]
+            rotated_by_year.setdefault(year, []).append((date_str, heading_line, cleaned_section))
+            result['rotated_count'] += 1
+            result['rotated_dates'].append(date_str)
+        else:
+            kept_sections.append(cleaned_section)
+            result['kept_count'] += 1
+
+    if result['rotated_count'] == 0:
+        return result
+
+    archive_dir = vault_path / "Brain_Operations" / "Archive"
+    if not dry_run:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+    years_touched = sorted(rotated_by_year.keys())
+    for year in years_touched:
+        archive_file = archive_dir / f"Nightly_Log_{year}.md"
+        rel_archive = str(archive_file.relative_to(vault_path))
+        result['archive_files'].append(rel_archive)
+
+        if not dry_run:
+            if archive_file.exists():
+                arch_content = archive_file.read_text(encoding='utf-8', errors='replace').rstrip()
+            else:
+                arch_content = (
+                    f"# Brain Operations - Nightly Agent Log Archive ({year})\n\n"
+                    f"Cold-storage archive of autonomous nightly runs from {year} older than the {keep_days}-day "
+                    f"rolling window in [[Brain_Operations/00_Nightly_Log.md|00_Nightly_Log.md]].\n\n"
+                    f"> [!note] Cold Storage Notice for AI Agents\n"
+                    f"> Do **not** read this archive file during normal nightly runs unless you are certain "
+                    f"historical log entries older than {keep_days} days are specifically needed.\n\n"
+                    f"---"
+                )
+
+            existing_headings = set(
+                m.group(0).strip() for m in LOG_DATE_HEADING_REGEX.finditer(arch_content)
+            )
+            new_blocks: List[str] = []
+            for _, heading_line, sec_text in rotated_by_year[year]:
+                if heading_line not in existing_headings:
+                    new_blocks.append(sec_text)
+                    existing_headings.add(heading_line)
+
+            if new_blocks:
+                updated_arch = arch_content.rstrip() + "\n\n" + "\n\n---\n\n".join(new_blocks) + "\n"
+                archive_file.write_text(updated_arch, encoding='utf-8')
+
+    if not dry_run:
+        current_year = datetime.now().strftime('%Y')
+        active_header = (
+            f"# Brain Operations - Nightly Agent Log\n\n"
+            f"Log of autonomous nightly runs executed by Antigravity using skill `obsidian-nightly-operator` "
+            f"({keep_days}-day rolling window).\n"
+            f"Older entries are archived in [[Brain_Operations/Archive/Nightly_Log_{current_year}.md|Nightly_Log_{current_year}.md]] "
+            f"(cold storage — agents must **not** read the archive file unless historical log context is specifically required).\n\n"
+            f"---"
+        )
+        if kept_sections:
+            new_active_content = active_header + "\n\n" + "\n\n---\n\n".join(kept_sections) + "\n"
+        else:
+            new_active_content = active_header + "\n"
+        log_path.write_text(new_active_content, encoding='utf-8')
+
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Obsidian Bases Task Scanner & In-Place Dossier Manager")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -463,6 +579,15 @@ def main():
     archive_parser = subparsers.add_parser("archive", help="Move status: archived task notes into TODO/Archive/")
     archive_parser.add_argument("--vault", required=True, help="Path to Obsidian vault")
     archive_parser.add_argument("--dry-run", action="store_true", help="Preview files to move without moving")
+
+    # rotate-log subcommand
+    rotate_parser = subparsers.add_parser(
+        "rotate-log",
+        help="Rotate Brain_Operations/00_Nightly_Log.md entries older than N days into yearly cold storage",
+    )
+    rotate_parser.add_argument("--vault", required=True, help="Path to Obsidian vault")
+    rotate_parser.add_argument("--keep-days", type=int, default=14, help="Rolling window in days to keep in active log (default: 14)")
+    rotate_parser.add_argument("--dry-run", action="store_true", help="Preview rotation without modifying files")
 
     args = parser.parse_args()
     vault_path = Path(args.vault).resolve()
@@ -537,6 +662,18 @@ def main():
             print(f"{prefix}Archived {len(moved)} task(s) to TODO/Archive/:")
             for m in moved:
                 print(f"  - {m['from']} -> {m['to']}")
+
+    elif args.command == "rotate-log":
+        res = rotate_nightly_log(vault_path, keep_days=args.keep_days, dry_run=args.dry_run)
+        if res['rotated_count'] == 0:
+            print(f"No log sections older than {args.keep_days} days found in Brain_Operations/00_Nightly_Log.md (kept {res['kept_count']} section(s)).")
+        else:
+            prefix = "[DRY-RUN] " if args.dry_run else ""
+            targets = ", ".join(res['archive_files'])
+            print(
+                f"{prefix}Rotated {res['rotated_count']} dated section(s) ({res['rotated_dates'][0]} .. {res['rotated_dates'][-1]}) "
+                f"to {targets}; kept {res['kept_count']} recent section(s) in Brain_Operations/00_Nightly_Log.md."
+            )
 
 
 if __name__ == "__main__":

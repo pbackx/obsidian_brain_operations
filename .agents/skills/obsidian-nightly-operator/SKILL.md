@@ -61,8 +61,10 @@ When given a specific task file (e.g. `Process ONLY the single task note at '<fi
      - Prepend tonight's dated entry (`### YYYY-MM-DD - <Milestone Title>`) to `## Activity Log`.
 4. **Step 4 - Finalize Status & Callout via `vault_tool.py update`:**
    - Call `scripts/vault_tool.py update` to set `--status completed` or `--status needs-clarification`, update the frontmatter `summary` / `question` fields, and refresh the top callout block.
-5. **Step 5 - Daily Summary Log:**
+5. **Step 5 - Daily Summary Log (14-Day Rolling Window):**
    - Append a summary entry to `<VAULT_PATH>/Brain_Operations/00_Nightly_Log.md` linking to `[[<file>|<Task Title>]]`.
+   - `Brain_Operations/00_Nightly_Log.md` maintains a 14-day rolling window, while older entries are automatically rotated into yearly cold-storage files at `<VAULT_PATH>/Brain_Operations/Archive/Nightly_Log_<YYYY>.md`.
+   - **Never** read `Brain_Operations/Archive/Nightly_Log_<YYYY>.md` unless you are certain a task specifically requires consulting historical nightly run logs older than 14 days.
 
 ### Mode B: Full Vault Scan (Fallback / Manual Run)
 If invoked without a specific task target:

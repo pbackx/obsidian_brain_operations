@@ -43,6 +43,7 @@ TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10800}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-1800}"
 MIN_TASK_TIMEOUT="${MIN_TASK_TIMEOUT:-120}"
 MAX_TASK_TIMEOUT="${MAX_TASK_TIMEOUT:-7200}"
+LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-14}"
 
 # Quota-aware model routing & automatic fallback settings
 QUOTA_AUTO_DOWNGRADE="${QUOTA_AUTO_DOWNGRADE:-true}"
@@ -153,18 +154,23 @@ python3 "$SCRIPT_DIR/vault_tool.py" archive --vault "$VAULT_LOCAL" || {
     echo "WARNING: Archive sweep encountered an issue."
 }
 
-echo "[2a/4] Scanning vault for pending status: ai-queue tasks..."
+echo "[2a/4] Rotating Brain_Operations/00_Nightly_Log.md (${LOG_RETENTION_DAYS}-day rolling window)..."
+python3 "$SCRIPT_DIR/vault_tool.py" rotate-log --vault "$VAULT_LOCAL" --keep-days "$LOG_RETENTION_DAYS" || {
+    echo "WARNING: Nightly log rotation encountered an issue."
+}
+
+echo "[2b/4] Scanning vault for pending status: ai-queue tasks..."
 python3 "$SCRIPT_DIR/vault_tool.py" scan --vault "$VAULT_LOCAL" --limit "$MAX_TASKS"
 
 if [[ -f "$SCRIPT_DIR/cover_tool.py" ]]; then
-    echo "[2b/4] Ensuring local SVG emoji covers for all cards on the AI Workflow Board..."
+    echo "[2c/4] Ensuring local SVG emoji covers for all cards on the AI Workflow Board..."
     python3 "$SCRIPT_DIR/cover_tool.py" ensure --vault "$VAULT_LOCAL" || {
         echo "WARNING: Cover ensure sweep encountered an issue."
     }
 fi
 
 if [[ -f "$SCRIPT_DIR/check_quota.py" ]]; then
-    echo "[2c/4] Checking live Antigravity quota buckets..."
+    echo "[2d/4] Checking live Antigravity quota buckets..."
     python3 "$SCRIPT_DIR/check_quota.py" || {
         echo "WARNING: Quota check encountered an issue, continuing with default model settings."
     }
@@ -294,7 +300,7 @@ elif remarks:
     lines.append("NOTES_AND_REMARKS>>>")
     lines.append("")
 
-lines.append(f"Advance the task, update '\''{f}'\'' in-place with your findings/architecture/activity log (keeping '\''## Notes & Remarks'\'' intact at the top), run vault_tool.py update --file '\''{f}'\'' (setting --status '\''completed'\'' or '\''needs-clarification'\'', and optionally --emoji '\''<1-3 fitting emojis>'\''), and append tonight'\''s action to Brain_Operations/00_Nightly_Log.md.")
+lines.append(f"Advance the task, update '\''{f}'\'' in-place with your findings/architecture/activity log (keeping '\''## Notes & Remarks'\'' intact at the top), run vault_tool.py update --file '\''{f}'\'' (setting --status '\''completed'\'' or '\''needs-clarification'\'', and optionally --emoji '\''<1-3 fitting emojis>'\''), and append tonight'\''s action to Brain_Operations/00_Nightly_Log.md (do NOT read Brain_Operations/Archive/Nightly_Log_*.md cold storage unless historical log entries older than 14 days are specifically needed).")
 print("\n".join(lines))
 ' "$TASK_JSON" "$VAULT_LOCAL" "$CURRENT_TASK_TIMEOUT")
 
