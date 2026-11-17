@@ -38,6 +38,8 @@ SYNC_METHOD="${SYNC_METHOD:-obsidian-headless}"
 VAULT_REMOTE="${VAULT_REMOTE:-}"
 BACKUP_DIR="${BACKUP_DIR:-$HOME/vault_sync/backups}"
 MAX_TASKS="${MAX_TASKS:-3}"
+AGENT_RUNNER="${AGENT_RUNNER:-agy}"
+PI_MODEL="${PI_MODEL:-openrouter/anthropic/claude-sonnet-latest}"
 EFFORT="${EFFORT:-high}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10800}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-1800}"
@@ -75,6 +77,8 @@ echo " Vault Local:   $VAULT_LOCAL"
 echo " Sync Method:   $SYNC_METHOD"
 echo " Node Version:  $(command -v node >/dev/null && node -v || echo 'Not found')"
 echo " Obsidian CLI:  $(command -v ob >/dev/null && echo 'Ready' || echo 'Not installed / not in PATH')"
+echo " Pi CLI:        $(command -v pi >/dev/null && pi --version 2>/dev/null || echo 'Not installed / not in PATH')"
+echo " Default Runner: $AGENT_RUNNER (Pi default model: $PI_MODEL)"
 echo " Max Tasks:     $MAX_TASKS"
 echo " Time Budget:   ${TIMEOUT_SECONDS}s total (default ${TASK_TIMEOUT}s/task, max ${MAX_TASK_TIMEOUT}s/task)"
 echo " Effort:        $EFFORT"
@@ -218,6 +222,21 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     TASK_IS_FOLLOWUP=$(python3 -c "import sys, json; print('true' if json.loads(sys.argv[1]).get('is_followup') else 'false')" "$TASK_JSON")
     TASK_TIMEOUT_RAW=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('timeout') or '')" "$TASK_JSON")
     TASK_CUSTOM_TIMEOUT=$(python3 -c "import sys, json; v = json.loads(sys.argv[1]).get('timeout_seconds'); print(v if isinstance(v, int) and v > 0 else '')" "$TASK_JSON")
+    TASK_RUNNER_RAW=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('runner') or '')" "$TASK_JSON")
+    TASK_MODEL_RAW=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('model') or '')" "$TASK_JSON")
+
+    # Resolve runner (frontmatter override vs AGENT_RUNNER default 'agy')
+    CURRENT_RUNNER="${TASK_RUNNER_RAW:-$AGENT_RUNNER}"
+    CURRENT_RUNNER="${CURRENT_RUNNER,,}"
+    if [[ "$CURRENT_RUNNER" != "agy" && "$CURRENT_RUNNER" != "pi" ]]; then
+        echo ">>> WARNING: Unrecognized runner '$CURRENT_RUNNER' for $TASK_FILE; falling back to 'agy'."
+        CURRENT_RUNNER="agy"
+    fi
+    if [[ -n "$TASK_RUNNER_RAW" ]]; then
+        RUNNER_SOURCE="frontmatter override"
+    else
+        RUNNER_SOURCE="default"
+    fi
 
     # Resolve per-task timeout (frontmatter override vs default TASK_TIMEOUT) with safety bounds
     if [[ -n "$TASK_CUSTOM_TIMEOUT" ]]; then
@@ -240,22 +259,45 @@ for ((i=1; i<=MAX_TASKS; i++)); do
         TIMEOUT_SOURCE="${TIMEOUT_SOURCE}, capped at remaining nightly budget"
     fi
 
-    # Resolve model dynamically before each task based on live quota buckets
+    # Resolve runner-specific model before starting the task
     SELECTED_MODEL=""
     AGY_MODEL_ARGS=(--effort "$EFFORT")
-    if [[ "${QUOTA_AUTO_DOWNGRADE,,}" == "true" && -f "$SCRIPT_DIR/check_quota.py" ]]; then
-        SELECTED_MODEL=$(python3 "$SCRIPT_DIR/check_quota.py" --select-model 2>/dev/null || echo "")
-        if [[ -n "$SELECTED_MODEL" ]]; then
-            # Model slugs in agy (e.g. gemini-4-argon-high, claude-opus-5-5-high, gemini-3.8-flash-high)
-            # already encode their effort level; passing --model sets both model and effort cleanly.
-            AGY_MODEL_ARGS=(--model "$SELECTED_MODEL")
+    PI_MODEL_ARGS=()
+    DISPLAY_MODEL=""
+
+    if [[ "$CURRENT_RUNNER" == "pi" ]]; then
+        PI_RAW_MODEL="${TASK_MODEL_RAW:-$PI_MODEL}"
+        if [[ "$PI_RAW_MODEL" == ollama/* ]]; then
+            PI_MODEL_ARGS=(--model "$PI_RAW_MODEL")
+            DISPLAY_MODEL="$PI_RAW_MODEL"
+        else
+            PI_OPENROUTER_MODEL="${PI_RAW_MODEL#openrouter/}"
+            PI_MODEL_ARGS=(--provider openrouter --model "$PI_OPENROUTER_MODEL")
+            DISPLAY_MODEL="openrouter/${PI_OPENROUTER_MODEL}"
         fi
+        if [[ -n "$TASK_MODEL_RAW" ]]; then
+            DISPLAY_MODEL="${DISPLAY_MODEL} (frontmatter override)"
+        else
+            DISPLAY_MODEL="${DISPLAY_MODEL} (default PI_MODEL)"
+        fi
+    else
+        # Keep existing agy quota-aware model resolution logic
+        if [[ "${QUOTA_AUTO_DOWNGRADE,,}" == "true" && -f "$SCRIPT_DIR/check_quota.py" ]]; then
+            SELECTED_MODEL=$(python3 "$SCRIPT_DIR/check_quota.py" --select-model 2>/dev/null || echo "")
+            if [[ -n "$SELECTED_MODEL" ]]; then
+                # Model slugs in agy (e.g. gemini-4-argon-high, claude-opus-5-5-high, gemini-3.8-flash-high)
+                # already encode their effort level; passing --model sets both model and effort cleanly.
+                AGY_MODEL_ARGS=(--model "$SELECTED_MODEL")
+            fi
+        fi
+        DISPLAY_MODEL="${SELECTED_MODEL:-default (--effort $EFFORT)}"
     fi
 
     echo ">>> [Task $i/$MAX_TASKS] Starting: $TASK_TITLE"
     echo "    File:     $TASK_FILE (category: $TASK_CATEGORY, follow-up: $TASK_IS_FOLLOWUP)"
     echo "    ID:       $TASK_ID"
-    echo "    Model:    ${SELECTED_MODEL:-default (--effort $EFFORT)}"
+    echo "    Runner:   $CURRENT_RUNNER ($RUNNER_SOURCE)"
+    echo "    Model:    $DISPLAY_MODEL"
     echo "    Timeout:  ${CURRENT_TASK_TIMEOUT}s (${TIMEOUT_SOURCE} | Remaining nightly budget: ${REMAINING}s)"
 
     TASK_PROMPT=$(python3 -c '
@@ -305,34 +347,51 @@ print("\n".join(lines))
 ' "$TASK_JSON" "$VAULT_LOCAL" "$CURRENT_TASK_TIMEOUT")
 
     TASK_START=$(date +%s)
-    if agy -p "$TASK_PROMPT" \
-        "${AGY_MODEL_ARGS[@]}" \
-        --dangerously-skip-permissions \
-        --print-timeout "${CURRENT_TASK_TIMEOUT}s"; then
-        TASK_END=$(date +%s)
-        TASK_DURATION=$((TASK_END - TASK_START))
-        echo ">>> [Task $i/$MAX_TASKS] Completed successfully in ${TASK_DURATION}s (model: ${SELECTED_MODEL:-default})."
+    if [[ "$CURRENT_RUNNER" == "pi" ]]; then
+        if ! command -v pi >/dev/null 2>&1; then
+            echo ">>> ERROR: [Task $i/$MAX_TASKS] 'pi' CLI not found in PATH."
+        elif [[ "${PI_RAW_MODEL:-}" != ollama/* && -z "${OPENROUTER_API_KEY:-}" ]]; then
+            echo ">>> ERROR: [Task $i/$MAX_TASKS] runner 'pi' requires OPENROUTER_API_KEY in environment or config/settings.env."
+        elif PI_NO_GATE=1 timeout --signal=TERM --kill-after=30s "${CURRENT_TASK_TIMEOUT}s" \
+            pi -p --approve "${PI_MODEL_ARGS[@]}" "$TASK_PROMPT"; then
+            TASK_END=$(date +%s)
+            TASK_DURATION=$((TASK_END - TASK_START))
+            echo ">>> [Task $i/$MAX_TASKS] Completed successfully in ${TASK_DURATION}s (runner: pi, model: ${DISPLAY_MODEL})."
+        else
+            TASK_END=$(date +%s)
+            TASK_DURATION=$((TASK_END - TASK_START))
+            echo ">>> WARNING: [Task $i/$MAX_TASKS] Pi reported non-zero status or timed out after ${TASK_DURATION}s (model: ${DISPLAY_MODEL})."
+        fi
     else
-        TASK_END=$(date +%s)
-        TASK_DURATION=$((TASK_END - TASK_START))
-        echo ">>> WARNING: [Task $i/$MAX_TASKS] Reported non-zero status or timed out after ${TASK_DURATION}s (model: ${SELECTED_MODEL:-default})."
+        if agy -p "$TASK_PROMPT" \
+            "${AGY_MODEL_ARGS[@]}" \
+            --dangerously-skip-permissions \
+            --print-timeout "${CURRENT_TASK_TIMEOUT}s"; then
+            TASK_END=$(date +%s)
+            TASK_DURATION=$((TASK_END - TASK_START))
+            echo ">>> [Task $i/$MAX_TASKS] Completed successfully in ${TASK_DURATION}s (runner: agy, model: ${SELECTED_MODEL:-default})."
+        else
+            TASK_END=$(date +%s)
+            TASK_DURATION=$((TASK_END - TASK_START))
+            echo ">>> WARNING: [Task $i/$MAX_TASKS] Reported non-zero status or timed out after ${TASK_DURATION}s (runner: agy, model: ${SELECTED_MODEL:-default})."
 
-        # If auto-downgrade is enabled and the failure happened quickly (e.g., mid-task quota exhaustion
-        # rather than a full task timeout), attempt one automatic fallback retry on the next model bucket.
-        if [[ "${QUOTA_AUTO_DOWNGRADE,,}" == "true" && -n "$SELECTED_MODEL" ]] && (( TASK_DURATION < CURRENT_TASK_TIMEOUT - 30 )); then
-            RETRY_MODEL=$(python3 "$SCRIPT_DIR/check_quota.py" --select-model --exclude-models "$SELECTED_MODEL" 2>/dev/null || echo "")
-            if [[ -n "$RETRY_MODEL" && "$RETRY_MODEL" != "$SELECTED_MODEL" ]]; then
-                echo ">>> [Task $i/$MAX_TASKS] Retrying automatically with fallback model: $RETRY_MODEL"
-                RETRY_START=$(date +%s)
-                if agy -p "$TASK_PROMPT" \
-                    --model "$RETRY_MODEL" \
-                    --dangerously-skip-permissions \
-                    --print-timeout "${CURRENT_TASK_TIMEOUT}s"; then
-                    RETRY_END=$(date +%s)
-                    echo ">>> [Task $i/$MAX_TASKS] Fallback retry on $RETRY_MODEL succeeded in $((RETRY_END - RETRY_START))s."
-                else
-                    RETRY_END=$(date +%s)
-                    echo ">>> WARNING: [Task $i/$MAX_TASKS] Fallback retry on $RETRY_MODEL also failed after $((RETRY_END - RETRY_START))s."
+            # If auto-downgrade is enabled and the failure happened quickly (e.g., mid-task quota exhaustion
+            # rather than a full task timeout), attempt one automatic fallback retry on the next model bucket.
+            if [[ "${QUOTA_AUTO_DOWNGRADE,,}" == "true" && -n "$SELECTED_MODEL" ]] && (( TASK_DURATION < CURRENT_TASK_TIMEOUT - 30 )); then
+                RETRY_MODEL=$(python3 "$SCRIPT_DIR/check_quota.py" --select-model --exclude-models "$SELECTED_MODEL" 2>/dev/null || echo "")
+                if [[ -n "$RETRY_MODEL" && "$RETRY_MODEL" != "$SELECTED_MODEL" ]]; then
+                    echo ">>> [Task $i/$MAX_TASKS] Retrying automatically with fallback model: $RETRY_MODEL"
+                    RETRY_START=$(date +%s)
+                    if agy -p "$TASK_PROMPT" \
+                        --model "$RETRY_MODEL" \
+                        --dangerously-skip-permissions \
+                        --print-timeout "${CURRENT_TASK_TIMEOUT}s"; then
+                        RETRY_END=$(date +%s)
+                        echo ">>> [Task $i/$MAX_TASKS] Fallback retry on $RETRY_MODEL succeeded in $((RETRY_END - RETRY_START))s."
+                    else
+                        RETRY_END=$(date +%s)
+                        echo ">>> WARNING: [Task $i/$MAX_TASKS] Fallback retry on $RETRY_MODEL also failed after $((RETRY_END - RETRY_START))s."
+                    fi
                 fi
             fi
         fi

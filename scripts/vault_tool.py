@@ -253,6 +253,14 @@ def scan_vault(vault_path: Path, excludes: Optional[set] = None, target_status: 
             notes_and_remarks = extract_user_remarks(body)
             timeout_raw = fm.get('timeout', '').strip()
             timeout_seconds = parse_timeout_seconds(timeout_raw)
+            runner_raw = (fm.get('runner') or fm.get('agent_runner') or '').lower().strip()
+            if runner_raw and runner_raw not in ('agy', 'pi'):
+                print(
+                    f"Warning: Unrecognized runner '{runner_raw}' in {rel_file_path}, falling back to 'agy'.",
+                    file=sys.stderr,
+                )
+                runner_raw = 'agy'
+            model_raw = (fm.get('model') or fm.get('pi_model') or '').strip()
             mtime = file_path.stat().st_mtime
 
             tasks.append({
@@ -265,6 +273,8 @@ def scan_vault(vault_path: Path, excludes: Optional[set] = None, target_status: 
                 'priority_label': priority_label,
                 'priority': priority_score,
                 'is_followup': is_followup,
+                'runner': runner_raw,
+                'model': model_raw,
                 'timeout': timeout_raw,
                 'timeout_seconds': timeout_seconds,
                 'created': fm.get('created', ''),
@@ -290,6 +300,8 @@ def update_task_note(
     emoji_text: Optional[str] = None,
     cover_text: Optional[str] = None,
     timeout_text: Optional[str] = None,
+    runner_text: Optional[str] = None,
+    model_text: Optional[str] = None,
 ) -> bool:
     """
     Updates a task note's YAML frontmatter and top Latest AI Update callout in-place.
@@ -329,6 +341,12 @@ def update_task_note(
     if timeout_text is not None:
         cleaned_timeout = timeout_text.strip()
         updates['timeout'] = cleaned_timeout if cleaned_timeout else None
+    if runner_text is not None:
+        cleaned_runner = runner_text.lower().strip()
+        updates['runner'] = cleaned_runner if cleaned_runner else None
+    if model_text is not None:
+        cleaned_model = model_text.strip()
+        updates['model'] = cleaned_model if cleaned_model else None
 
     # Handle cover generation / assignment
     if cover_text:
@@ -574,6 +592,16 @@ def main():
         default=None,
         help="Optional per-task timeout override (e.g. '45m', '2h', '90'; pass '' to remove)",
     )
+    update_parser.add_argument(
+        "--runner",
+        default=None,
+        help="Optional per-task runner override ('agy' or 'pi'; pass '' to remove)",
+    )
+    update_parser.add_argument(
+        "--model",
+        default=None,
+        help="Optional per-task OpenRouter model override for pi (e.g. 'anthropic/claude-sonnet-4.5'; pass '' to remove)",
+    )
 
     # archive subcommand
     archive_parser = subparsers.add_parser("archive", help="Move status: archived task notes into TODO/Archive/")
@@ -606,7 +634,9 @@ def main():
                 for t in tasks:
                     followup_tag = " [FOLLOW-UP]" if t.get('is_followup') else ""
                     timeout_tag = f", timeout: {t['timeout']} ({t['timeout_seconds']}s)" if t.get('timeout_seconds') else ""
-                    print(f"[{t['priority']}] {t['file']} (category: {t['category']}, priority: {t['priority_label']}{timeout_tag}){followup_tag}")
+                    runner_tag = f", runner: {t['runner']}" if t.get('runner') else ""
+                    model_tag = f", model: {t['model']}" if t.get('model') else ""
+                    print(f"[{t['priority']}] {t['file']} (category: {t['category']}, priority: {t['priority_label']}{runner_tag}{model_tag}{timeout_tag}){followup_tag}")
                     print(f"     Title: {t['title']}")
                     if t['summary']:
                         print(f"     Previous Summary: {t['summary']}")
@@ -645,6 +675,8 @@ def main():
             emoji_text=args.emoji,
             cover_text=args.cover,
             timeout_text=args.timeout,
+            runner_text=args.runner,
+            model_text=args.model,
         )
         if success:
             print(f"Successfully updated {args.file} (status={STATUS_ALIASES.get(chosen_status.lower(), chosen_status.lower())})")

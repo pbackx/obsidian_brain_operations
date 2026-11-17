@@ -34,6 +34,7 @@ You are an autonomous overnight operations agent. Your mission is to inspect the
 6. **Token & Scope Discipline (Clean Isolated Contexts & Per-Task Timeouts):**
    - The nightly orchestrator processes tasks sequentially in isolated sessions to prevent context bleed.
    - Each task runs with either the default timeout (`30m` / `1800s`) or a custom per-task `timeout` defined in the note's YAML frontmatter (e.g. `timeout: 45m`, `timeout: 2h`, or `timeout: 90` for 90 minutes, capped at `MAX_TASK_TIMEOUT=7200s`).
+   - Tasks can optionally override the execution engine via `runner: agy | pi` (default `agy`) and, when `runner: pi` is selected, override the OpenRouter model via `model: <openrouter-model-id>` (e.g. `anthropic/claude-sonnet-4.5` or `openrouter/google/gemini-2.5-pro`). When `runner` is `agy` or omitted, `run_nightly.sh` continues using its standard quota-aware Antigravity routing.
    - Always respect the `Time Budget:` passed in your task prompt and reserve the final 3–4 minutes to commit/push any git changes, run `vault_tool.py update`, and append to `Brain_Operations/00_Nightly_Log.md` so you never get cut off mid-wrap-up.
    - When given a specific task file to process, focus exclusively on advancing that single task to a meaningful milestone.
 7. **Tier 4 Persistent Memory (`Brain_Operations/MEMORY.md`):**
@@ -102,6 +103,8 @@ type: task
 status: needs-clarification | completed
 category: general | home-automation | finance | lego-ai | games | music | language | freewrite
 priority: normal | high | low
+runner: agy | pi (optional per-task runner override; defaults to agy)
+model: <openrouter-model-id> (optional OpenRouter model override used when runner is pi)
 timeout: 30m | 45m | 2h (optional per-task timeout override; plain numbers = minutes)
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
