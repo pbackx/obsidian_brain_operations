@@ -9,5 +9,10 @@ updated: "{{date}}"
 
 # {{title}}
 
+> [!tip] Optional Frontmatter Properties
+> - **`runner`:** `agy` *(default, quota-aware Antigravity)* | `pi` *(Pi coding agent)*
+> - **`model`:** OpenRouter model ID for `runner: pi` *(e.g. `anthropic/claude-sonnet-4.5`, `google/gemini-2.5-pro`, `deepseek/deepseek-chat`; defaults to `PI_MODEL`)*
+> - **`timeout`:** Per-task time budget *(default `30m`, max `2h`; accepts `45m`, `1h30m`, `1800s`, or plain numbers in minutes like `45`)*
+
 ## Notes & Remarks
 - 
