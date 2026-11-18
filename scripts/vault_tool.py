@@ -261,6 +261,7 @@ def scan_vault(vault_path: Path, excludes: Optional[set] = None, target_status: 
                 )
                 runner_raw = 'agy'
             model_raw = (fm.get('model') or fm.get('pi_model') or '').strip()
+            provider_raw = (fm.get('provider') or fm.get('openrouter_provider') or '').strip()
             mtime = file_path.stat().st_mtime
 
             tasks.append({
@@ -275,6 +276,7 @@ def scan_vault(vault_path: Path, excludes: Optional[set] = None, target_status: 
                 'is_followup': is_followup,
                 'runner': runner_raw,
                 'model': model_raw,
+                'provider': provider_raw,
                 'timeout': timeout_raw,
                 'timeout_seconds': timeout_seconds,
                 'created': fm.get('created', ''),
@@ -302,6 +304,7 @@ def update_task_note(
     timeout_text: Optional[str] = None,
     runner_text: Optional[str] = None,
     model_text: Optional[str] = None,
+    provider_text: Optional[str] = None,
 ) -> bool:
     """
     Updates a task note's YAML frontmatter and top Latest AI Update callout in-place.
@@ -347,6 +350,9 @@ def update_task_note(
     if model_text is not None:
         cleaned_model = model_text.strip()
         updates['model'] = cleaned_model if cleaned_model else None
+    if provider_text is not None:
+        cleaned_provider = provider_text.strip()
+        updates['provider'] = cleaned_provider if cleaned_provider else None
 
     # Handle cover generation / assignment
     if cover_text:
@@ -602,6 +608,11 @@ def main():
         default=None,
         help="Optional per-task OpenRouter model override for pi (e.g. 'anthropic/claude-sonnet-4.5'; pass '' to remove)",
     )
+    update_parser.add_argument(
+        "--provider",
+        default=None,
+        help="Optional per-task OpenRouter upstream provider slug(s) for pi (e.g. 'nebius' or 'nebius,mistral'; pass '' to remove)",
+    )
 
     # archive subcommand
     archive_parser = subparsers.add_parser("archive", help="Move status: archived task notes into TODO/Archive/")
@@ -636,7 +647,8 @@ def main():
                     timeout_tag = f", timeout: {t['timeout']} ({t['timeout_seconds']}s)" if t.get('timeout_seconds') else ""
                     runner_tag = f", runner: {t['runner']}" if t.get('runner') else ""
                     model_tag = f", model: {t['model']}" if t.get('model') else ""
-                    print(f"[{t['priority']}] {t['file']} (category: {t['category']}, priority: {t['priority_label']}{runner_tag}{model_tag}{timeout_tag}){followup_tag}")
+                    provider_tag = f", provider: {t['provider']}" if t.get('provider') else ""
+                    print(f"[{t['priority']}] {t['file']} (category: {t['category']}, priority: {t['priority_label']}{runner_tag}{model_tag}{provider_tag}{timeout_tag}){followup_tag}")
                     print(f"     Title: {t['title']}")
                     if t['summary']:
                         print(f"     Previous Summary: {t['summary']}")
@@ -677,6 +689,7 @@ def main():
             timeout_text=args.timeout,
             runner_text=args.runner,
             model_text=args.model,
+            provider_text=args.provider,
         )
         if success:
             print(f"Successfully updated {args.file} (status={STATUS_ALIASES.get(chosen_status.lower(), chosen_status.lower())})")

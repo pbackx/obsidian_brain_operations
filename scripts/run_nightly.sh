@@ -40,6 +40,7 @@ BACKUP_DIR="${BACKUP_DIR:-$HOME/vault_sync/backups}"
 MAX_TASKS="${MAX_TASKS:-3}"
 AGENT_RUNNER="${AGENT_RUNNER:-agy}"
 PI_MODEL="${PI_MODEL:-openrouter/anthropic/claude-sonnet-latest}"
+PI_OPENROUTER_PROVIDER="${PI_OPENROUTER_PROVIDER:-}"
 EFFORT="${EFFORT:-high}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10800}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-1800}"
@@ -224,6 +225,7 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     TASK_CUSTOM_TIMEOUT=$(python3 -c "import sys, json; v = json.loads(sys.argv[1]).get('timeout_seconds'); print(v if isinstance(v, int) and v > 0 else '')" "$TASK_JSON")
     TASK_RUNNER_RAW=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('runner') or '')" "$TASK_JSON")
     TASK_MODEL_RAW=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('model') or '')" "$TASK_JSON")
+    TASK_PROVIDER_RAW=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('provider') or '')" "$TASK_JSON")
 
     # Resolve runner (frontmatter override vs AGENT_RUNNER default 'agy')
     CURRENT_RUNNER="${TASK_RUNNER_RAW:-$AGENT_RUNNER}"
@@ -263,6 +265,9 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     SELECTED_MODEL=""
     AGY_MODEL_ARGS=(--effort "$EFFORT")
     PI_MODEL_ARGS=()
+    PI_EXT_ARGS=()
+    PI_SELECTED_PROVIDER=""
+    PROVIDER_SOURCE=""
     DISPLAY_MODEL=""
 
     if [[ "$CURRENT_RUNNER" == "pi" ]]; then
@@ -274,6 +279,16 @@ for ((i=1; i<=MAX_TASKS; i++)); do
             PI_OPENROUTER_MODEL="${PI_RAW_MODEL#openrouter/}"
             PI_MODEL_ARGS=(--provider openrouter --model "$PI_OPENROUTER_MODEL")
             DISPLAY_MODEL="openrouter/${PI_OPENROUTER_MODEL}"
+
+            PI_SELECTED_PROVIDER="${TASK_PROVIDER_RAW:-$PI_OPENROUTER_PROVIDER}"
+            if [[ -n "$TASK_PROVIDER_RAW" ]]; then
+                PROVIDER_SOURCE="frontmatter override"
+            elif [[ -n "$PI_OPENROUTER_PROVIDER" ]]; then
+                PROVIDER_SOURCE="default PI_OPENROUTER_PROVIDER"
+            fi
+            if [[ -n "$PI_SELECTED_PROVIDER" && -f "$SCRIPT_DIR/pi_openrouter_provider.ts" ]]; then
+                PI_EXT_ARGS=(-e "$SCRIPT_DIR/pi_openrouter_provider.ts")
+            fi
         fi
         if [[ -n "$TASK_MODEL_RAW" ]]; then
             DISPLAY_MODEL="${DISPLAY_MODEL} (frontmatter override)"
@@ -298,6 +313,9 @@ for ((i=1; i<=MAX_TASKS; i++)); do
     echo "    ID:       $TASK_ID"
     echo "    Runner:   $CURRENT_RUNNER ($RUNNER_SOURCE)"
     echo "    Model:    $DISPLAY_MODEL"
+    if [[ -n "$PI_SELECTED_PROVIDER" ]]; then
+        echo "    Provider: $PI_SELECTED_PROVIDER ($PROVIDER_SOURCE)"
+    fi
     echo "    Timeout:  ${CURRENT_TASK_TIMEOUT}s (${TIMEOUT_SOURCE} | Remaining nightly budget: ${REMAINING}s)"
 
     TASK_PROMPT=$(python3 -c '
@@ -353,8 +371,8 @@ print("\n".join(lines))
         elif [[ "${PI_RAW_MODEL:-}" != ollama/* && -z "${OPENROUTER_API_KEY:-}" ]]; then
             echo ">>> ERROR: [Task $i/$MAX_TASKS] runner 'pi' requires OPENROUTER_API_KEY in environment or config/settings.env."
         else
-            if PI_NO_GATE=1 timeout --signal=TERM --kill-after=30s "${CURRENT_TASK_TIMEOUT}s" \
-                pi -p --approve "${PI_MODEL_ARGS[@]}" "$TASK_PROMPT"; then
+            if PI_NO_GATE=1 PI_OPENROUTER_PROVIDER="$PI_SELECTED_PROVIDER" timeout --signal=TERM --kill-after=30s "${CURRENT_TASK_TIMEOUT}s" \
+                pi -p --approve "${PI_EXT_ARGS[@]}" "${PI_MODEL_ARGS[@]}" "$TASK_PROMPT"; then
                 TASK_END=$(date +%s)
                 TASK_DURATION=$((TASK_END - TASK_START))
                 echo ">>> [Task $i/$MAX_TASKS] Completed successfully in ${TASK_DURATION}s (runner: pi, model: ${DISPLAY_MODEL})."
