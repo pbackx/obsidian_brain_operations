@@ -352,15 +352,75 @@ print("\n".join(lines))
             echo ">>> ERROR: [Task $i/$MAX_TASKS] 'pi' CLI not found in PATH."
         elif [[ "${PI_RAW_MODEL:-}" != ollama/* && -z "${OPENROUTER_API_KEY:-}" ]]; then
             echo ">>> ERROR: [Task $i/$MAX_TASKS] runner 'pi' requires OPENROUTER_API_KEY in environment or config/settings.env."
-        elif PI_NO_GATE=1 timeout --signal=TERM --kill-after=30s "${CURRENT_TASK_TIMEOUT}s" \
-            pi -p --approve "${PI_MODEL_ARGS[@]}" "$TASK_PROMPT"; then
-            TASK_END=$(date +%s)
-            TASK_DURATION=$((TASK_END - TASK_START))
-            echo ">>> [Task $i/$MAX_TASKS] Completed successfully in ${TASK_DURATION}s (runner: pi, model: ${DISPLAY_MODEL})."
         else
-            TASK_END=$(date +%s)
-            TASK_DURATION=$((TASK_END - TASK_START))
-            echo ">>> WARNING: [Task $i/$MAX_TASKS] Pi reported non-zero status or timed out after ${TASK_DURATION}s (model: ${DISPLAY_MODEL})."
+            if PI_NO_GATE=1 timeout --signal=TERM --kill-after=30s "${CURRENT_TASK_TIMEOUT}s" \
+                pi -p --approve "${PI_MODEL_ARGS[@]}" "$TASK_PROMPT"; then
+                TASK_END=$(date +%s)
+                TASK_DURATION=$((TASK_END - TASK_START))
+                echo ">>> [Task $i/$MAX_TASKS] Completed successfully in ${TASK_DURATION}s (runner: pi, model: ${DISPLAY_MODEL})."
+            else
+                PI_RC=$?
+                TASK_END=$(date +%s)
+                TASK_DURATION=$((TASK_END - TASK_START))
+                echo ">>> WARNING: [Task $i/$MAX_TASKS] Pi exited with code ${PI_RC} after ${TASK_DURATION}s (model: ${DISPLAY_MODEL})."
+            fi
+
+            # Print concise telemetry & error diagnostics from Pi's session JSONL log
+            python3 -c '
+import json, os, sys
+from pathlib import Path
+
+task_start = int(sys.argv[1])
+sessions_root = Path(os.path.expanduser("~/.pi/agent/sessions"))
+if not sessions_root.exists():
+    sys.exit(0)
+
+candidates = [p for p in sessions_root.rglob("*.jsonl") if p.stat().st_mtime >= task_start - 2]
+if not candidates:
+    print("    Pi Log:   No session JSONL file created.")
+    sys.exit(0)
+
+latest = max(candidates, key=lambda p: p.stat().st_mtime)
+turns = 0
+tool_calls = []
+total_cost = 0.0
+last_stop = ""
+last_raw_stop = ""
+last_err = ""
+
+for line in latest.read_text(encoding="utf-8", errors="replace").splitlines():
+    if not line.strip():
+        continue
+    try:
+        ev = json.loads(line)
+    except Exception:
+        continue
+    if ev.get("type") != "message":
+        continue
+    msg = ev.get("message", {})
+    role = msg.get("role")
+    if role == "assistant":
+        turns += 1
+        usage = msg.get("usage") or {}
+        cost = (usage.get("cost") or {}).get("total")
+        if isinstance(cost, (int, float)):
+            total_cost += cost
+        last_stop = msg.get("stopReason") or last_stop
+        last_raw_stop = msg.get("rawStopReason") or last_raw_stop
+        last_err = msg.get("errorMessage") or last_err
+        for part in msg.get("content") or []:
+            if isinstance(part, dict) and part.get("type") == "toolCall":
+                tool_calls.append(part.get("name", "?"))
+    elif role == "toolResult" and msg.get("isError"):
+        tname = msg.get("toolName", "?")
+        tool_calls.append(f"{tname}[ERR]")
+
+recent_tools = ", ".join(tool_calls[-8:]) if tool_calls else "none"
+print(f"    Pi Log:   {latest}")
+print(f"    Pi Stats: {turns} turn(s), {len(tool_calls)} tool call(s) ({recent_tools}), cost=${total_cost:.4f}, stop={last_stop}/{last_raw_stop}")
+if last_err:
+    print(f"    Pi Error: {last_err}")
+' "$TASK_START" || true
         fi
     else
         if agy -p "$TASK_PROMPT" \
