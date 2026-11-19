@@ -1,6 +1,6 @@
 ---
 name: obsidian-nightly-operator
-description: Autonomous overnight agent skill for triaging, analyzing, and advancing 1-file-per-task notes queued with `status: ai-queue` in an Obsidian Bases & Kanban workflow.
+description: "Autonomous overnight agent skill for triaging, analyzing, and advancing 1-file-per-task notes queued with `status: ai-queue` in an Obsidian Bases & Kanban workflow."
 ---
 
 # Obsidian Nightly Operator Skill (1-File-Per-Task Obsidian Bases Architecture)
