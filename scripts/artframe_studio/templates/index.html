@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ArtFrame Studio</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <h1>🖼️ ArtFrame Studio</h1>
+  <p class="sub">Photo → AI remix → {{ frame_width }}×{{ frame_height }} E Ink push, without the AI Studio subscription.</p>
+  <p class="badges">
+    <span class="badge {{ 'ok' if remix_ready else 'bad' }}">remix {{ 'ready' if remix_ready else 'no API key' }}</span>
+    <span class="badge {{ 'ok' if switchbot_ready else 'bad' }}">switchbot {{ 'ready' if switchbot_ready else 'not configured' }}</span>
+  </p>
+</header>
+
+<main>
+  <section class="panel">
+    <label id="drop" class="drop">
+      <input type="file" id="photo" accept="image/*" hidden>
+      <img id="preview" alt="" hidden>
+      <span id="dropText">Drop a Google Photos export here, or click to pick a file</span>
+    </label>
+
+    <h2>Style</h2>
+    <div id="styles" class="chips">
+      {% for s in styles %}
+      <button class="chip{{ ' active' if loop.first }}" data-style="{{ s.key }}">{{ s.emoji }} {{ s.label }}</button>
+      {% endfor %}
+    </div>
+
+    <details>
+      <summary>Advanced</summary>
+      <label>Extra art direction <input id="extra" placeholder="e.g. autumn colours, add a bicycle"></label>
+      <label>Model <input id="model" value="{{ default_model }}"></label>
+      <label>Dither
+        <select id="dither">
+          <option value="floyd_steinberg">Floyd–Steinberg (best for photos)</option>
+          <option value="bayer">Ordered / Bayer</option>
+          <option value="none">None (flat art)</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" id="quantize"> Pre-dither before upload (A/B test; the panel quantises itself)</label>
+    </details>
+
+    <div class="actions">
+      <button id="go" class="primary" disabled>✨ Remix</button>
+      <button id="push" class="ghost" disabled>📤 Push to frame</button>
+      <span id="status" class="status"></span>
+    </div>
+  </section>
+
+  <section class="panel result">
+    <h2>Result</h2>
+    <div class="switcher">
+      <button class="tab active" data-view="frame">📤 Sent to frame</button>
+      <button class="tab" data-view="eink">👁️ E Ink simulation</button>
+      <button class="tab" data-view="result">🎨 AI remix</button>
+      <button class="tab" data-view="source">📷 Source</button>
+    </div>
+    <img id="view" alt="result preview" hidden>
+    <p id="meta" class="status"></p>
+  </section>
+
+  <section class="panel gallery">
+    <h2>Gallery</h2>
+    <div id="history" class="grid"></div>
+  </section>
+</main>
+
+<footer>
+  <span>Right-click a result → <em>Save image</em> to keep a copy.</span>
+</footer>
+
+<script type="module" src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
