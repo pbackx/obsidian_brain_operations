@@ -3,16 +3,23 @@
 gdrive_triage.py - Interactive Google Drive Migration & Triage Assistant
 
 Features:
-- Caches Google Drive file metadata in a local SQLite database to prevent API rate limits.
-- Provides folder-by-folder or recursive indexing via rclone (`gdrive:`).
-- Categorizes files: spreadsheets, documents, presentations, PDFs, CAD drawings, images, archives.
+- Caches ONLY Google-native documents (Google Sheets, Google Docs, Google Slides,
+  Google Drawings where Size == -1 in rclone lsjson) in a local SQLite database
+  to prevent API rate limits. Regular binary files (PDFs, native uploaded Excel/Word
+  files, images, archives, CAD) that can be opened without Google Drive tools are
+  excluded.
+- Note on file conversion: Google-native documents are NOT converted during indexing
+  (rclone merely previews their target export extension .xlsx/.docx/.pptx). Actual
+  conversion occurs on-demand only when the user clicks "To Collabora" or "To NAS".
 - Web UI (vanilla HTML/JS/CSS, zero dependencies):
-  * Filter by folder, category, and triage status.
-  * Instant search across thousands of files (< 5ms).
-  * 1-Click "Convert & Import to Collabora Online" (CT 104).
-  * 1-Click "Archive to Synology NAS".
-  * Mark as "Ignored" or "To Delete".
-  * Direct Google Drive link for every file.
+  * Filter by folder, Google Doc type, and triage status.
+  * Instant search across cached files (< 5ms).
+  * 1-Click "Convert & Import to Collabora Online" (via miniwopi HTTP POST /upload).
+  * 1-Click "Convert & Archive to NAS".
+  * 1-Click "Delete from Google Drive" (available directly on pending items and
+    after inspecting a converted file in Collabora or on NAS; no Ignore button).
+  * Direct Google Drive link and direct Collabora Editor link (/edit/<file>) for
+    every file.
 """
 
 import argparse
@@ -20,22 +27,27 @@ import datetime
 import html
 import json
 import os
-import shutil
 import sqlite3
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
+import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_DB_PATH = os.path.expanduser("~/.local/share/gdrive_triage/gdrive_triage.db")
 DEFAULT_PORT = 8085
-COLLABORA_SSH_HOST = os.environ.get("COLLABORA_HOST", "127.0.0.1")
-COLLABORA_SSH_USER = os.environ.get("COLLABORA_USER", "root")
-COLLABORA_TARGET_DIR = os.environ.get("COLLABORA_DIR", "/srv/spreadsheets")
-COLLABORA_WEB_URL = os.environ.get("COLLABORA_URL", "http://collabora:9980")
+COLLABORA_WEB_URL = os.environ.get("COLLABORA_URL", "http://collabora").rstrip("/")
 NAS_ARCHIVE_DIR = os.environ.get("NAS_ARCHIVE_DIR", os.path.expanduser("~/archive/google_drive"))
+DEFAULT_EXCLUDES = [
+    "backup",
+    "Postbox",
+    "temp_download_copy_needs_cleanup",
+    ".ssh",
+    "Colab Notebooks",
+]
 
 
 def get_db(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -57,9 +69,14 @@ def get_db(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
                 triage_status TEXT DEFAULT 'pending',
                 target_path TEXT,
                 notes TEXT,
+                drive_deleted INTEGER NOT NULL DEFAULT 0,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(items)").fetchall()]
+        if "drive_deleted" not in cols:
+            conn.execute("ALTER TABLE items ADD COLUMN drive_deleted INTEGER NOT NULL DEFAULT 0")
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_folder ON items(folder)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_category ON items(category)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON items(triage_status)")
@@ -72,6 +89,17 @@ def get_db(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
                 item_count INTEGER DEFAULT 0
             )
         """)
+
+        # Keep strictly Google-native documents (size = -1, is_dir = 0)
+        conn.execute("DELETE FROM items WHERE size != -1 OR is_dir != 0")
+
+        # Fix any legacy miscategorized Google Slides presentations
+        conn.execute("""
+            UPDATE items
+            SET category = 'presentation'
+            WHERE (mime_type LIKE '%presentation%' OR LOWER(name) LIKE '%.pptx' OR LOWER(name) LIKE '%.odp')
+              AND category != 'presentation'
+        """)
     return conn
 
 
@@ -83,30 +111,44 @@ def categorize_item(name: str, mime: str, is_dir: bool) -> str:
 
     if "spreadsheet" in lower_mime or lower_name.endswith((".xlsx", ".xls", ".ods", ".csv")):
         return "spreadsheet"
-    if "document" in lower_mime or "msword" in lower_mime or lower_name.endswith((".docx", ".doc", ".odt", ".rtf", ".txt")):
-        return "document"
     if "presentation" in lower_mime or "powerpoint" in lower_mime or lower_name.endswith((".pptx", ".ppt", ".odp")):
         return "presentation"
-    if "pdf" in lower_mime or lower_name.endswith(".pdf"):
-        return "pdf"
-    if "image" in lower_mime or lower_name.endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp")):
-        return "image"
-    if "zip" in lower_mime or "tar" in lower_mime or "compressed" in lower_mime or lower_name.endswith((".zip", ".tar", ".gz", ".7z", ".rar")):
-        return "archive"
-    if "dwg" in lower_mime or lower_name.endswith((".dwg", ".dxf")):
-        return "cad"
+    if (
+        "wordprocessingml" in lower_mime
+        or "msword" in lower_mime
+        or "opendocument.text" in lower_mime
+        or lower_name.endswith((".docx", ".doc", ".odt", ".rtf", ".txt"))
+    ):
+        return "document"
+    if "svg" in lower_mime or lower_name.endswith(".svg"):
+        return "drawing"
     return "other"
 
 
 def index_folder(folder_name: str, db_path: str = DEFAULT_DB_PATH, max_depth: int = 4) -> int:
-    """Scan a Google Drive folder via rclone lsjson and store in SQLite."""
-    print(f"Indexing Google Drive folder: '{folder_name}' (max-depth {max_depth})...")
-    remote_path = f"gdrive:{folder_name}" if folder_name else "gdrive:"
-    cmd = ["rclone", "lsjson", remote_path, "--recursive", f"--max-depth={max_depth}"]
+    """Scan a Google Drive folder via rclone lsjson and store ONLY Google-native documents (Size == -1) in SQLite."""
+    is_root = not folder_name or folder_name == "root"
+    folder_label = "root" if is_root else folder_name
+    remote_path = "gdrive:" if is_root else f"gdrive:{folder_name}"
+    effective_depth = 1 if is_root else max_depth
+
+    print(f"Indexing Google-native documents in '{folder_label}' (max-depth {effective_depth})...")
+    cmd = ["rclone", "--bind", "0.0.0.0", "lsjson", remote_path, "--files-only"]
+    if is_root:
+        cmd.append("--max-depth=1")
+    else:
+        cmd.extend([
+            "--recursive",
+            f"--max-depth={effective_depth}",
+        ])
+
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=45)
+    except subprocess.TimeoutExpired:
+        print(f"Timeout scanning folder '{folder_label}'.", file=sys.stderr)
+        return 0
     except subprocess.CalledProcessError as exc:
-        print(f"Error running rclone: {exc.stderr}", file=sys.stderr)
+        print(f"Error running rclone on '{folder_label}': {exc.stderr}", file=sys.stderr)
         return 0
 
     items = json.loads(res.stdout)
@@ -119,35 +161,54 @@ def index_folder(folder_name: str, db_path: str = DEFAULT_DB_PATH, max_depth: in
             item_id = it.get("ID")
             if not item_id:
                 continue
+            is_dir = 1 if it.get("IsDir", False) else 0
+            size = it.get("Size", -1)
+
+            # Strictly include only Google-native virtual documents (Size == -1)
+            if is_dir == 1 or size != -1:
+                continue
+
             name = it.get("Name", "")
             rel_path = it.get("Path", "")
-            full_path = f"{folder_name}/{rel_path}" if folder_name else rel_path
+            full_path = rel_path if is_root else f"{folder_name}/{rel_path}"
             mime = it.get("MimeType", "")
-            size = it.get("Size", -1)
             mod_time = it.get("ModTime", "")
-            is_dir = 1 if it.get("IsDir", False) else 0
-            category = categorize_item(name, mime, is_dir == 1)
+            category = categorize_item(name, mime, False)
 
-            # Preserve existing triage status if already triaged
-            existing = conn.execute("SELECT triage_status, target_path, notes FROM items WHERE id = ?", (item_id,)).fetchone()
+            existing = conn.execute(
+                "SELECT path, folder, triage_status, target_path, notes, drive_deleted FROM items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
             triage_status = existing["triage_status"] if existing else "pending"
             target_path = existing["target_path"] if existing else None
             notes = existing["notes"] if existing else None
+            drive_deleted = existing["drive_deleted"] if existing else 0
+            if existing and len(existing["path"]) < len(full_path):
+                full_path = existing["path"]
+                eff_folder = existing["folder"]
+            else:
+                eff_folder = folder_label
 
             conn.execute("""
-                INSERT INTO items (id, path, name, folder, is_dir, mime_type, size, mod_time, category, triage_status, target_path, notes, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO items (
+                    id, path, name, folder, is_dir, mime_type, size, mod_time,
+                    category, triage_status, target_path, notes, drive_deleted, updated_at
+                )
+                VALUES (?, ?, ?, ?, 0, ?, -1, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     path = excluded.path,
                     name = excluded.name,
                     folder = excluded.folder,
-                    is_dir = excluded.is_dir,
+                    is_dir = 0,
                     mime_type = excluded.mime_type,
-                    size = excluded.size,
+                    size = -1,
                     mod_time = excluded.mod_time,
                     category = excluded.category,
                     updated_at = excluded.updated_at
-            """, (item_id, full_path, name, folder_name or "root", is_dir, mime, size, mod_time, category, triage_status, target_path, notes, now_iso))
+            """, (
+                item_id, full_path, name, eff_folder, mime, mod_time,
+                category, triage_status, target_path, notes, drive_deleted, now_iso
+            ))
             count += 1
 
         conn.execute("""
@@ -156,27 +217,35 @@ def index_folder(folder_name: str, db_path: str = DEFAULT_DB_PATH, max_depth: in
             ON CONFLICT(name) DO UPDATE SET
                 last_scanned = excluded.last_scanned,
                 item_count = excluded.item_count
-        """, (folder_name or "root", now_iso, count))
+        """, (folder_label, now_iso, count))
 
-    print(f"Successfully indexed {count} items in folder '{folder_name}'.")
+    print(f"Indexed {count} Google-native document(s) in '{folder_label}'.")
     return count
 
 
 def list_top_folders() -> List[str]:
     """List top-level directories on gdrive:"""
-    cmd = ["rclone", "lsd", "gdrive:", "--max-depth=1"]
+    cmd = ["rclone", "--bind", "0.0.0.0", "lsd", "gdrive:", "--max-depth=1"]
     res = subprocess.run(cmd, capture_output=True, text=True, check=True)
     folders = []
     for line in res.stdout.strip().splitlines():
         parts = line.split()
-        if parts:
-            folder_name = parts[-1]
+        if len(parts) >= 5:
+            # rclone lsd format: "-1 YYYY-MM-DD HH:MM:SS -1 <folder name>"
+            folder_name = " ".join(parts[4:])
             folders.append(folder_name)
     return folders
 
 
-def index_all_folders(exclude_folders: Optional[List[str]] = None, db_path: str = DEFAULT_DB_PATH, max_depth: int = 4):
-    excludes = set(exclude_folders or ["backup", "Postbox"])
+def index_all_folders(
+    exclude_folders: Optional[List[str]] = None,
+    db_path: str = DEFAULT_DB_PATH,
+    max_depth: int = 4,
+):
+    excludes = set(exclude_folders or DEFAULT_EXCLUDES)
+    # Index root-level Google-native docs first
+    index_folder("root", db_path=db_path, max_depth=1)
+
     all_folders = list_top_folders()
     print(f"Discovered {len(all_folders)} top-level folders on Google Drive.")
     for f in all_folders:
@@ -192,23 +261,32 @@ def index_all_folders(exclude_folders: Optional[List[str]] = None, db_path: str 
 def get_folders_summary(db_path: str = DEFAULT_DB_PATH) -> List[Dict[str, Any]]:
     conn = get_db(db_path)
     rows = conn.execute("""
-        SELECT folder, 
+        SELECT folder,
                COUNT(*) as total,
-               SUM(CASE WHEN triage_status = 'pending' AND is_dir = 0 THEN 1 ELSE 0 END) as pending,
+               SUM(CASE WHEN triage_status = 'pending' AND drive_deleted = 0 THEN 1 ELSE 0 END) as pending,
                SUM(CASE WHEN triage_status = 'imported_collabora' THEN 1 ELSE 0 END) as imported,
                SUM(CASE WHEN triage_status = 'archived_nas' THEN 1 ELSE 0 END) as archived,
-               SUM(CASE WHEN category IN ('spreadsheet', 'document', 'presentation') AND is_dir = 0 THEN 1 ELSE 0 END) as office_count
+               SUM(CASE WHEN triage_status = 'deleted' OR drive_deleted = 1 THEN 1 ELSE 0 END) as deleted,
+               SUM(CASE WHEN category IN ('spreadsheet', 'document', 'presentation') THEN 1 ELSE 0 END) as office_count
         FROM items
+        WHERE is_dir = 0 AND size = -1
         GROUP BY folder
-        ORDER BY total DESC
+        HAVING total > 0
+        ORDER BY pending DESC, total DESC
     """).fetchall()
     return [dict(r) for r in rows]
 
 
-def get_items(db_path: str = DEFAULT_DB_PATH, folder: Optional[str] = None, category: Optional[str] = None,
-              status: Optional[str] = None, query: Optional[str] = None, limit: int = 250) -> List[Dict[str, Any]]:
+def get_items(
+    db_path: str = DEFAULT_DB_PATH,
+    folder: Optional[str] = None,
+    category: Optional[str] = None,
+    status: Optional[str] = None,
+    query: Optional[str] = None,
+    limit: int = 300,
+) -> List[Dict[str, Any]]:
     conn = get_db(db_path)
-    clauses = ["is_dir = 0"]
+    clauses = ["is_dir = 0", "size = -1"]
     params: List[Any] = []
 
     if folder and folder != "all":
@@ -218,8 +296,13 @@ def get_items(db_path: str = DEFAULT_DB_PATH, folder: Optional[str] = None, cate
         clauses.append("category = ?")
         params.append(category)
     if status and status != "all":
-        clauses.append("triage_status = ?")
-        params.append(status)
+        if status == "deleted":
+            clauses.append("(triage_status = 'deleted' OR drive_deleted = 1)")
+        elif status == "pending":
+            clauses.append("(triage_status = 'pending' AND drive_deleted = 0)")
+        else:
+            clauses.append("triage_status = ?")
+            params.append(status)
     if query:
         clauses.append("(name LIKE ? OR path LIKE ?)")
         params.extend([f"%{query}%", f"%{query}%"])
@@ -227,11 +310,100 @@ def get_items(db_path: str = DEFAULT_DB_PATH, folder: Optional[str] = None, cate
     sql = f"SELECT * FROM items WHERE {' AND '.join(clauses)} ORDER BY mod_time DESC LIMIT ?"
     params.append(limit)
     rows = conn.execute(sql, params).fetchall()
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["collabora_edit_url"] = build_collabora_edit_url(d)
+        result.append(d)
+    return result
+
+
+def build_collabora_edit_url(item: Dict[str, Any]) -> str:
+    """Build direct Collabora /edit/<encoded_relpath> URL for an item."""
+    rel_target = item.get("target_path") or ""
+    if rel_target.startswith("/srv/spreadsheets/"):
+        rel_target = rel_target[len("/srv/spreadsheets/"):]
+    elif rel_target.startswith("/"):
+        rel_target = ""
+
+    if not rel_target:
+        rel_dir = os.path.dirname(item.get("path", "")) if item.get("folder") != "root" else ""
+        fname = ensure_office_extension(item.get("name", ""), item.get("category", ""))
+        rel_target = f"{rel_dir}/{fname}" if rel_dir else fname
+
+    return f"{COLLABORA_WEB_URL}/edit/{urllib.parse.quote(rel_target, safe='')}"
+
+
+def ensure_office_extension(name: str, category: str) -> str:
+    ext = os.path.splitext(name)[1].lower()
+    if not ext:
+        if category == "spreadsheet":
+            return name + ".xlsx"
+        if category == "document":
+            return name + ".docx"
+        if category == "presentation":
+            return name + ".pptx"
+    return name
+
+
+def upload_to_miniwopi(local_file_path: str, folder: str, filename: str) -> Tuple[bool, str]:
+    """Upload an exported Office file to Collabora's miniwopi host via HTTP POST /upload."""
+    boundary = f"----GDriveTriageBoundary{uuid.uuid4().hex}"
+    with open(local_file_path, "rb") as f:
+        file_bytes = f.read()
+
+    parts: List[bytes] = []
+    # folder field
+    parts.append(f"--{boundary}\r\n".encode("utf-8"))
+    parts.append(b'Content-Disposition: form-data; name="folder"\r\n\r\n')
+    parts.append(f"{folder}\r\n".encode("utf-8"))
+
+    # file field
+    safe_fname = filename.replace('"', "")
+    parts.append(f"--{boundary}\r\n".encode("utf-8"))
+    parts.append(
+        f'Content-Disposition: form-data; name="file"; filename="{safe_fname}"\r\n'.encode("utf-8")
+    )
+    parts.append(b"Content-Type: application/octet-stream\r\n\r\n")
+    parts.append(file_bytes)
+    parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+
+    body = b"".join(parts)
+    upload_url = f"{COLLABORA_WEB_URL}/upload"
+
+    class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def http_error_303(self, req, fp, code, msg, headers):
+            return fp
+
+        def http_error_302(self, req, fp, code, msg, headers):
+            return fp
+
+    opener = urllib.request.build_opener(NoRedirectHandler)
+    req = urllib.request.Request(
+        upload_url,
+        data=body,
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+        },
+        method="POST",
+    )
+    try:
+        resp = opener.open(req, timeout=30)
+        code = getattr(resp, "status", resp.getcode())
+        if code in (200, 201, 302, 303):
+            return True, "Uploaded to Collabora via miniwopi HTTP endpoint"
+        return False, f"Unexpected HTTP status {code} from {upload_url}"
+    except urllib.error.HTTPError as exc:
+        if exc.code in (302, 303):
+            return True, "Uploaded to Collabora via miniwopi HTTP endpoint"
+        return False, f"HTTP upload to {upload_url} failed: HTTP {exc.code} {exc.reason}"
+    except Exception as exc:
+        return False, f"HTTP upload to {upload_url} failed: {exc}"
 
 
 def import_item_to_collabora(item_id: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[bool, str]:
-    """Export file from Google Drive via rclone and deploy to CT 104 /srv/spreadsheets/."""
+    """Convert Google-native document via rclone and upload to Collabora."""
     conn = get_db(db_path)
     item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
     if not item:
@@ -239,67 +411,48 @@ def import_item_to_collabora(item_id: str, db_path: str = DEFAULT_DB_PATH) -> Tu
 
     rel_path = item["path"]
     folder = item["folder"]
-    name = item["name"]
     category = item["category"]
-
-    # Determine file extension if converting
-    ext = os.path.splitext(name)[1].lower()
-    if not ext:
-        if category == "spreadsheet":
-            ext = ".xlsx"
-            name = name + ".xlsx"
-        elif category == "document":
-            ext = ".docx"
-            name = name + ".docx"
-        elif category == "presentation":
-            ext = ".pptx"
-            name = name + ".pptx"
+    name = ensure_office_extension(item["name"], category)
 
     local_tmp_dir = os.path.expanduser("~/.cache/gdrive_triage/export")
     os.makedirs(local_tmp_dir, exist_ok=True)
     local_tmp_file = os.path.join(local_tmp_dir, name)
 
-    # Export / copy from Google Drive
-    print(f"Exporting 'gdrive:{rel_path}' to temporary file '{local_tmp_file}'...")
-    copy_cmd = ["rclone", "copyto", f"gdrive:{rel_path}", local_tmp_file]
-    res = subprocess.run(copy_cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        return False, f"rclone copy failed: {res.stderr}"
+    print(f"Converting & exporting 'gdrive:{rel_path}' (ID: {item_id}) to '{local_tmp_file}'...")
+    copyid_cmd = ["rclone", "--bind", "0.0.0.0", "backend", "copyid", "gdrive:", item_id, local_tmp_file]
+    res = subprocess.run(copyid_cmd, capture_output=True, text=True)
+    if res.returncode != 0 or not os.path.exists(local_tmp_file):
+        # Fallback to copy by path
+        copy_cmd = ["rclone", "--bind", "0.0.0.0", "copyto", f"gdrive:{rel_path}", local_tmp_file]
+        res2 = subprocess.run(copy_cmd, capture_output=True, text=True)
+        if res2.returncode != 0:
+            return False, f"rclone export failed: {res.stderr or res2.stderr}"
 
-    # SCP to CT 104
-    target_subfolder = f"{COLLABORA_TARGET_DIR}/{folder}" if folder != "root" else COLLABORA_TARGET_DIR
-    target_remote_path = f"{target_subfolder}/{name}"
+    target_subfolder = os.path.dirname(rel_path) if folder != "root" else ""
+    target_rel_path = f"{target_subfolder}/{name}" if target_subfolder else name
 
-    mkdir_cmd = ["ssh", "-o", "BatchMode=yes", f"{COLLABORA_SSH_USER}@{COLLABORA_SSH_HOST}", f"mkdir -p '{target_subfolder}'"]
-    subprocess.run(mkdir_cmd, check=True)
-
-    scp_cmd = ["scp", "-o", "BatchMode=yes", local_tmp_file, f"{COLLABORA_SSH_USER}@{COLLABORA_SSH_HOST}:{target_remote_path}"]
-    scp_res = subprocess.run(scp_cmd, capture_output=True, text=True)
-    if scp_res.returncode != 0:
-        return False, f"SCP to CT 104 failed: {scp_res.stderr}"
-
-    chown_cmd = ["ssh", "-o", "BatchMode=yes", f"{COLLABORA_SSH_USER}@{COLLABORA_SSH_HOST}", f"chown wopi:wopi '{target_remote_path}'"]
-    subprocess.run(chown_cmd, check=True)
-
-    # Clean local tmp
+    ok, upload_msg = upload_to_miniwopi(local_tmp_file, target_subfolder, name)
     if os.path.exists(local_tmp_file):
         os.remove(local_tmp_file)
+
+    if not ok:
+        return False, upload_msg
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with conn:
         conn.execute("""
-            UPDATE items 
-            SET triage_status = 'imported_collabora', 
+            UPDATE items
+            SET triage_status = 'imported_collabora',
                 target_path = ?,
                 updated_at = ?
             WHERE id = ?
-        """, (target_remote_path, now_iso, item_id))
+        """, (target_rel_path, now_iso, item_id))
 
-    return True, f"Successfully imported to CT 104: {target_remote_path}"
+    return True, f"Converted and imported to Collabora ({COLLABORA_WEB_URL}): {target_rel_path}"
 
 
 def archive_item_to_nas(item_id: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[bool, str]:
-    """Copy file to Synology NAS archive directory."""
+    """Convert and copy Google-native file to Synology NAS archive directory."""
     conn = get_db(db_path)
     item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
     if not item:
@@ -307,28 +460,62 @@ def archive_item_to_nas(item_id: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[b
 
     rel_path = item["path"]
     folder = item["folder"]
-    name = item["name"]
+    name = ensure_office_extension(item["name"], item["category"])
 
-    target_dir = os.path.join(NAS_ARCHIVE_DIR, folder if folder != "root" else "")
+    rel_dir = os.path.dirname(rel_path) if folder != "root" else ""
+    target_dir = os.path.join(NAS_ARCHIVE_DIR, rel_dir) if rel_dir else NAS_ARCHIVE_DIR
     os.makedirs(target_dir, exist_ok=True)
     target_path = os.path.join(target_dir, name)
 
-    copy_cmd = ["rclone", "copyto", f"gdrive:{rel_path}", target_path]
-    res = subprocess.run(copy_cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        return False, f"rclone archive to NAS failed: {res.stderr}"
+    copyid_cmd = ["rclone", "--bind", "0.0.0.0", "backend", "copyid", "gdrive:", item_id, target_path]
+    res = subprocess.run(copyid_cmd, capture_output=True, text=True)
+    if res.returncode != 0 or not os.path.exists(target_path):
+        copy_cmd = ["rclone", "--bind", "0.0.0.0", "copyto", f"gdrive:{rel_path}", target_path]
+        res2 = subprocess.run(copy_cmd, capture_output=True, text=True)
+        if res2.returncode != 0:
+            return False, f"rclone archive to NAS failed: {res.stderr or res2.stderr}"
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with conn:
         conn.execute("""
-            UPDATE items 
-            SET triage_status = 'archived_nas', 
+            UPDATE items
+            SET triage_status = 'archived_nas',
                 target_path = ?,
                 updated_at = ?
             WHERE id = ?
         """, (target_path, now_iso, item_id))
 
-    return True, f"Successfully archived to NAS: {target_path}"
+    return True, f"Converted and archived to NAS: {target_path}"
+
+
+def delete_item_from_gdrive(item_id: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[bool, str]:
+    """Delete the Google-native document from Google Drive (moves to Drive Trash via rclone deletefile)."""
+    conn = get_db(db_path)
+    item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    if not item:
+        return False, "Item not found"
+
+    rel_path = item["path"]
+    cur_status = item["triage_status"]
+
+    print(f"Deleting 'gdrive:{rel_path}' from Google Drive...")
+    del_cmd = ["rclone", "--bind", "0.0.0.0", "deletefile", f"gdrive:{rel_path}"]
+    res = subprocess.run(del_cmd, capture_output=True, text=True)
+    if res.returncode != 0 and "not found" not in (res.stderr or "").lower():
+        return False, f"rclone deletefile failed: {res.stderr}"
+
+    new_status = cur_status if cur_status in ("imported_collabora", "archived_nas") else "deleted"
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with conn:
+        conn.execute("""
+            UPDATE items
+            SET triage_status = ?,
+                drive_deleted = 1,
+                updated_at = ?
+            WHERE id = ?
+        """, (new_status, now_iso, item_id))
+
+    return True, f"Deleted '{rel_path}' from Google Drive."
 
 
 def update_item_status(item_id: str, status: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[bool, str]:
@@ -343,12 +530,12 @@ def update_item_status(item_id: str, status: str, db_path: str = DEFAULT_DB_PATH
 # WEB SERVER & UI
 # ----------------------------------------------------------------------
 
-HTML_TEMPLATE = """<!doctype html>
+HTML_TEMPLATE = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Google Drive Interactive Migration &amp; Triage</title>
+  <title>Google Docs &amp; Sheets Migration to Collabora</title>
   <style>
     :root {
       --bg: #f8fafc;
@@ -393,17 +580,31 @@ HTML_TEMPLATE = """<!doctype html>
       color: #93c5fd;
       text-decoration: none;
       margin-left: 1rem;
+      font-weight: 500;
+    }
+    .header-links a:hover {
+      text-decoration: underline;
     }
     .container {
       max-width: 1400px;
-      margin: 1.5rem auto;
+      margin: 1.25rem auto;
       padding: 0 1.5rem;
+    }
+    .info-banner {
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      color: #1e3a8a;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      margin-bottom: 1.25rem;
+      font-size: 0.875rem;
+      line-height: 1.45;
     }
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 1rem;
-      margin-bottom: 1.5rem;
+      margin-bottom: 1.25rem;
     }
     .stat-card {
       background: var(--card-bg);
@@ -412,7 +613,7 @@ HTML_TEMPLATE = """<!doctype html>
       border: 1px solid var(--border);
     }
     .stat-card .label {
-      font-size: 0.8rem;
+      font-size: 0.78rem;
       color: var(--text-muted);
       text-transform: uppercase;
       font-weight: 600;
@@ -431,7 +632,7 @@ HTML_TEMPLATE = """<!doctype html>
       flex-wrap: wrap;
       gap: 0.75rem;
       align-items: center;
-      margin-bottom: 1.5rem;
+      margin-bottom: 1.25rem;
     }
     select, input, button {
       padding: 0.5rem 0.75rem;
@@ -442,7 +643,7 @@ HTML_TEMPLATE = """<!doctype html>
     }
     input[type="search"] {
       flex: 1;
-      min-width: 250px;
+      min-width: 240px;
     }
     button.btn-primary {
       background: var(--primary);
@@ -461,7 +662,7 @@ HTML_TEMPLATE = """<!doctype html>
     }
     .pill {
       font-size: 0.8rem;
-      padding: 0.3rem 0.6rem;
+      padding: 0.3rem 0.65rem;
       border-radius: 20px;
       border: 1px solid var(--border);
       background: #f1f5f9;
@@ -501,13 +702,11 @@ HTML_TEMPLATE = """<!doctype html>
       font-size: 0.75rem;
       font-weight: 600;
       border-radius: 4px;
-      text-transform: capitalize;
     }
     .badge-pending { background: #fef3c7; color: #92400e; }
     .badge-imported_collabora { background: #dcfce7; color: #166534; }
     .badge-archived_nas { background: #e0e7ff; color: #3730a3; }
-    .badge-ignored { background: #f1f5f9; color: #475569; }
-    .badge-to_delete { background: #fee2e2; color: #991b1b; }
+    .badge-deleted { background: #fee2e2; color: #991b1b; }
     .badge-cat {
       background: #f1f5f9;
       color: #334155;
@@ -516,15 +715,21 @@ HTML_TEMPLATE = """<!doctype html>
     }
     .btn-group {
       display: flex;
-      gap: 0.3rem;
+      gap: 0.35rem;
+      flex-wrap: wrap;
+      align-items: center;
     }
     .btn-action {
-      padding: 0.25rem 0.5rem;
-      font-size: 0.75rem;
+      padding: 0.28rem 0.55rem;
+      font-size: 0.76rem;
       border-radius: 4px;
       border: 1px solid var(--border);
       cursor: pointer;
       background: white;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.2rem;
     }
     .btn-action:hover {
       background: #f1f5f9;
@@ -543,17 +748,27 @@ HTML_TEMPLATE = """<!doctype html>
     .btn-action.nas:hover {
       background: #faf5ff;
     }
-    .btn-action.ignore {
-      color: var(--text-muted);
+    .btn-action.delete {
+      color: var(--danger);
+      border-color: #fca5a5;
+    }
+    .btn-action.delete:hover {
+      background: #fef2f2;
     }
     .file-name {
       font-weight: 500;
       word-break: break-all;
+      color: #1e40af;
+      text-decoration: none;
+    }
+    .file-name:hover {
+      text-decoration: underline;
     }
     .file-path {
       font-size: 0.75rem;
       color: var(--text-muted);
       display: block;
+      margin-top: 0.15rem;
     }
     #toast {
       position: fixed;
@@ -572,30 +787,39 @@ HTML_TEMPLATE = """<!doctype html>
 </head>
 <body>
   <header>
-    <h1><span>🗂️</span> Google Drive Interactive Migration &amp; Triage</h1>
+    <h1><span>🗂️</span> Google Docs &amp; Sheets Migration to Collabora</h1>
     <div class="header-links">
-      <a href="#" id="link-collabora" target="_blank">Collabora Editor ↗</a>
+      <a href="__COLLABORA_WEB_URL__/" id="link-collabora" target="_blank">Collabora Editor ↗</a>
       <a href="https://drive.google.com/" target="_blank">Google Drive Web ↗</a>
     </div>
   </header>
 
   <div class="container">
+    <div class="info-banner">
+      <strong>Only Google-Native Documents Shown:</strong> PDFs, images, archives, and regular uploaded Excel/Word files are excluded — only proprietary Google Drive documents (Google Sheets, Docs, Slides) that cannot be opened without Google Drive tools are listed.
+      Files are <strong>not converted yet</strong>; conversion to <code>.xlsx</code> / <code>.docx</code> / <code>.pptx</code> happens on-demand when you click <strong>✨ To Collabora</strong> or <strong>💾 To NAS</strong>.
+    </div>
+
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="label">Total Cached Files</div>
+        <div class="label">Google-Native Docs</div>
         <div class="val" id="stat-total">-</div>
       </div>
       <div class="stat-card">
-        <div class="label">Pending Review</div>
+        <div class="label">Pending Triage</div>
         <div class="val" id="stat-pending" style="color:var(--warning)">-</div>
       </div>
       <div class="stat-card">
-        <div class="label">Imported to Collabora</div>
+        <div class="label">In Collabora</div>
         <div class="val" id="stat-imported" style="color:var(--success)">-</div>
       </div>
       <div class="stat-card">
         <div class="label">Archived to NAS</div>
         <div class="val" id="stat-archived" style="color:var(--purple)">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Deleted from Drive</div>
+        <div class="val" id="stat-deleted" style="color:var(--danger)">-</div>
       </div>
     </div>
 
@@ -606,40 +830,37 @@ HTML_TEMPLATE = """<!doctype html>
       </select>
       <button class="btn-primary" onclick="rescanFolder()">🔄 Re-Scan Folder</button>
 
-      <input type="search" id="search-box" placeholder="Instant search by name or path..." oninput="debounceSearch()">
+      <input type="search" id="search-box" placeholder="Instant search by name or folder..." oninput="debounceSearch()">
 
       <div class="filter-pills" id="category-pills">
-        <div class="pill active" data-cat="all" onclick="setCategory('all')">All Types</div>
-        <div class="pill" data-cat="spreadsheet" onclick="setCategory('spreadsheet')">📊 Spreadsheets</div>
-        <div class="pill" data-cat="document" onclick="setCategory('document')">📝 Docs</div>
-        <div class="pill" data-cat="pdf" onclick="setCategory('pdf')">📑 PDFs</div>
-        <div class="pill" data-cat="image" onclick="setCategory('image')">🖼 Images</div>
-        <div class="pill" data-cat="archive" onclick="setCategory('archive')">📦 Archives</div>
-        <div class="pill" data-cat="cad" onclick="setCategory('cad')">📐 CAD</div>
+        <div class="pill active" data-cat="all" onclick="setCategory('all')">All Google Docs</div>
+        <div class="pill" data-cat="spreadsheet" onclick="setCategory('spreadsheet')">📊 Google Sheets</div>
+        <div class="pill" data-cat="document" onclick="setCategory('document')">📝 Google Docs</div>
+        <div class="pill" data-cat="presentation" onclick="setCategory('presentation')">📽️ Google Slides</div>
       </div>
 
       <div class="filter-pills" id="status-pills">
         <div class="pill active" data-status="all" onclick="setStatus('all')">All Statuses</div>
         <div class="pill" data-status="pending" onclick="setStatus('pending')">Pending</div>
-        <div class="pill" data-status="imported_collabora" onclick="setStatus('imported_collabora')">Imported</div>
-        <div class="pill" data-status="archived_nas" onclick="setStatus('archived_nas')">Archived</div>
-        <div class="pill" data-status="ignored" onclick="setStatus('ignored')">Ignored</div>
+        <div class="pill" data-status="imported_collabora" onclick="setStatus('imported_collabora')">In Collabora</div>
+        <div class="pill" data-status="archived_nas" onclick="setStatus('archived_nas')">On NAS</div>
+        <div class="pill" data-status="deleted" onclick="setStatus('deleted')">Deleted from Drive</div>
       </div>
     </div>
 
     <table>
       <thead>
         <tr>
-          <th>File &amp; Path</th>
-          <th>Type</th>
-          <th>Size</th>
+          <th>Google Document &amp; Folder Path</th>
+          <th>Google Type &amp; Export Target</th>
+          <th>Conversion State</th>
           <th>Modified</th>
           <th>Status</th>
           <th>Actions</th>
         </tr>
       </thead>
       <tbody id="items-body">
-        <tr><td colspan="6" style="text-align:center;padding:2rem;">Loading cached items...</td></tr>
+        <tr><td colspan="6" style="text-align:center;padding:2rem;">Loading cached Google-native documents...</td></tr>
       </tbody>
     </table>
   </div>
@@ -650,8 +871,6 @@ HTML_TEMPLATE = """<!doctype html>
     let currentCategory = 'all';
     let currentStatus = 'all';
     let searchTimeout = null;
-    const collaboraUrl = window.location.protocol + '//' + window.location.hostname.replace(/:\d+$/, '') + ':9980';
-    document.getElementById('link-collabora').href = 'http://' + window.location.hostname + ':80';
 
     async function fetchStats() {
       const res = await fetch('/api/stats');
@@ -660,6 +879,7 @@ HTML_TEMPLATE = """<!doctype html>
       document.getElementById('stat-pending').innerText = data.pending;
       document.getElementById('stat-imported').innerText = data.imported;
       document.getElementById('stat-archived').innerText = data.archived;
+      document.getElementById('stat-deleted').innerText = data.deleted;
 
       const sel = document.getElementById('folder-select');
       const cur = sel.value;
@@ -667,7 +887,7 @@ HTML_TEMPLATE = """<!doctype html>
       for (const f of data.folders) {
         const opt = document.createElement('option');
         opt.value = f.folder;
-        opt.innerText = f.folder + ' (' + f.total + ' items, ' + f.pending + ' pending)';
+        opt.innerText = f.folder + ' (' + f.total + ' docs, ' + f.pending + ' pending)';
         if (f.folder === cur) opt.selected = true;
         sel.appendChild(opt);
       }
@@ -694,16 +914,51 @@ HTML_TEMPLATE = """<!doctype html>
       searchTimeout = setTimeout(loadItems, 200);
     }
 
-    function formatSize(sz) {
-      if (sz === -1 || sz === null) return '<span style="color:#64748b">Google Doc</span>';
-      if (sz < 1024) return sz + ' B';
-      if (sz < 1048576) return (sz / 1024).toFixed(1) + ' KB';
-      return (sz / 1048576).toFixed(1) + ' MB';
+    function formatTypeBadge(cat) {
+      if (cat === 'spreadsheet') return '<span class="badge badge-cat">📊 Google Sheet → .xlsx</span>';
+      if (cat === 'document') return '<span class="badge badge-cat">📝 Google Doc → .docx</span>';
+      if (cat === 'presentation') return '<span class="badge badge-cat">📽️ Google Slides → .pptx</span>';
+      if (cat === 'drawing') return '<span class="badge badge-cat">🎨 Google Drawing → .svg</span>';
+      return '<span class="badge badge-cat">' + escapeHtml(cat) + '</span>';
+    }
+
+    function formatConversionState(it) {
+      if (it.triage_status === 'imported_collabora') {
+        return '<span style="color:var(--success);font-weight:600;font-size:0.82rem">Converted &amp; in Collabora</span>';
+      }
+      if (it.triage_status === 'archived_nas') {
+        return '<span style="color:var(--purple);font-weight:600;font-size:0.82rem">Converted &amp; on NAS</span>';
+      }
+      if (it.triage_status === 'deleted' || it.drive_deleted === 1) {
+        return '<span style="color:var(--danger);font-size:0.82rem">Removed from Google Drive</span>';
+      }
+      return '<span style="color:#64748b;font-size:0.82rem">Not converted yet (converts on click)</span>';
+    }
+
+    function formatStatusBadges(it) {
+      let badges = '';
+      if (it.triage_status === 'imported_collabora') {
+        badges += '<span class="badge badge-imported_collabora">In Collabora</span> ';
+      } else if (it.triage_status === 'archived_nas') {
+        badges += '<span class="badge badge-archived_nas">Archived NAS</span> ';
+      } else if (it.triage_status === 'deleted') {
+        badges += '<span class="badge badge-deleted">Deleted</span> ';
+      } else {
+        badges += '<span class="badge badge-pending">Pending</span> ';
+      }
+      if (it.drive_deleted === 1 && it.triage_status !== 'deleted') {
+        badges += '<span class="badge badge-deleted">Deleted from Drive</span>';
+      }
+      return badges;
     }
 
     function formatDate(dt) {
       if (!dt) return '-';
       return dt.substring(0, 10);
+    }
+
+    function stripPreviewExtension(name) {
+      return name.replace(/\.(xlsx|docx|pptx|svg)$/i, '');
     }
 
     async function loadItems() {
@@ -720,40 +975,48 @@ HTML_TEMPLATE = """<!doctype html>
       const tbody = document.getElementById('items-body');
 
       if (!items || items.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:#64748b">No matching files found.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:#64748b">No matching Google-native documents found.</td></tr>';
         return;
       }
 
       let htmlRows = '';
       for (const it of items) {
         const driveUrl = 'https://drive.google.com/open?id=' + encodeURIComponent(it.id);
-        const statusBadge = '<span class="badge badge-' + it.triage_status + '">' + it.triage_status.replace('_', ' ') + '</span>';
-        const catBadge = '<span class="badge badge-cat">' + it.category + '</span>';
+        const cleanTitle = stripPreviewExtension(it.name);
+        const editUrl = it.collabora_edit_url;
+        const safeNameJs = escapeHtml(cleanTitle).replace(/'/g, "\\'");
 
-        let actionBtns = `
-          <button class="btn-action collab" title="Convert & Export to Collabora (CT 104)" onclick="doAction('${it.id}', 'collabora')">✨ To Collabora</button>
-          <button class="btn-action nas" title="Archive to Synology NAS" onclick="doAction('${it.id}', 'nas')">💾 To NAS</button>
-          <button class="btn-action ignore" title="Mark as Ignored" onclick="doAction('${it.id}', 'ignore')">👁 Ignore</button>
-        `;
-
+        let actionBtns = '';
         if (it.triage_status === 'imported_collabora') {
-          actionBtns = `<span style="color:var(--success);font-size:0.8rem;font-weight:600">✓ On CT 104</span>
-                        <a href="${collaboraUrl}" target="_blank" class="btn-action collab">Open in Collabora ↗</a>`;
+          actionBtns += `<a href="${editUrl}" target="_blank" class="btn-action collab" title="Inspect converted file in Collabora">Open in Collabora ↗</a>`;
+          if (!it.drive_deleted) {
+            actionBtns += `<button class="btn-action delete" title="Delete original from Google Drive after verifying conversion" onclick="confirmDelete('${it.id}', '${safeNameJs}')">🗑 Delete from Drive</button>`;
+          }
         } else if (it.triage_status === 'archived_nas') {
-          actionBtns = `<span style="color:var(--purple);font-size:0.8rem;font-weight:600">✓ On NAS</span>
-                        <button class="btn-action" onclick="doAction('${it.id}', 'pending')">Reset</button>`;
+          actionBtns += `<button class="btn-action collab" title="Also convert &amp; import to Collabora" onclick="doAction('${it.id}', 'collabora')">✨ To Collabora</button>`;
+          if (!it.drive_deleted) {
+            actionBtns += `<button class="btn-action delete" title="Delete original from Google Drive after verifying NAS archive" onclick="confirmDelete('${it.id}', '${safeNameJs}')">🗑 Delete from Drive</button>`;
+          }
+        } else if (it.triage_status === 'deleted' || it.drive_deleted === 1) {
+          actionBtns = `<span style="color:var(--text-muted);font-size:0.8rem">Deleted from Google Drive</span>`;
+        } else {
+          actionBtns = `
+            <button class="btn-action collab" title="Convert &amp; import to Collabora" onclick="doAction('${it.id}', 'collabora')">✨ To Collabora</button>
+            <button class="btn-action nas" title="Convert &amp; archive to NAS" onclick="doAction('${it.id}', 'nas')">💾 To NAS</button>
+            <button class="btn-action delete" title="Directly delete this document from Google Drive" onclick="confirmDelete('${it.id}', '${safeNameJs}')">🗑 Delete</button>
+          `;
         }
 
         htmlRows += `
           <tr>
             <td>
-              <a href="${driveUrl}" target="_blank" class="file-name" title="Open in Google Drive">${escapeHtml(it.name)}</a>
-              <span class="file-path">${escapeHtml(it.path)}</span>
+              <a href="${driveUrl}" target="_blank" class="file-name" title="Open original in Google Drive">${escapeHtml(cleanTitle)}</a>
+              <span class="file-path">Folder: <strong>${escapeHtml(it.folder)}</strong> · Export path: ${escapeHtml(it.path)}</span>
             </td>
-            <td>${catBadge}</td>
-            <td>${formatSize(it.size)}</td>
+            <td>${formatTypeBadge(it.category)}</td>
+            <td>${formatConversionState(it)}</td>
             <td>${formatDate(it.mod_time)}</td>
-            <td>${statusBadge}</td>
+            <td>${formatStatusBadges(it)}</td>
             <td><div class="btn-group">${actionBtns}</div></td>
           </tr>
         `;
@@ -761,8 +1024,15 @@ HTML_TEMPLATE = """<!doctype html>
       tbody.innerHTML = htmlRows;
     }
 
+    function confirmDelete(id, title) {
+      if (!confirm('Delete "' + title + '" from Google Drive (moves to Google Drive Trash)?')) {
+        return;
+      }
+      doAction(id, 'delete');
+    }
+
     async function doAction(id, act) {
-      showToast('Processing action: ' + act + '...');
+      showToast('Processing: ' + act + '...');
       const res = await fetch('/api/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -781,10 +1051,10 @@ HTML_TEMPLATE = """<!doctype html>
     async function rescanFolder() {
       const folder = document.getElementById('folder-select').value;
       if (folder === 'all') {
-        alert('Please select a specific folder to re-scan from Google Drive.');
+        alert('Please select a specific folder (or "root") from the dropdown to re-scan from Google Drive.');
         return;
       }
-      showToast('Scanning Google Drive folder: ' + folder + ' (this takes a few seconds)...');
+      showToast('Scanning Google Drive folder "' + folder + '" for Google-native documents...');
       const res = await fetch('/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -801,7 +1071,7 @@ HTML_TEMPLATE = """<!doctype html>
       toast.innerText = msg;
       toast.style.background = isError ? 'var(--danger)' : '#1e293b';
       toast.style.display = 'block';
-      setTimeout(() => { toast.style.display = 'none'; }, 4000);
+      setTimeout(() => { toast.style.display = 'none'; }, 4500);
     }
 
     function escapeHtml(s) {
@@ -847,21 +1117,32 @@ class TriageHandler(BaseHTTPRequestHandler):
         path = url.path
 
         if path == "/" or path == "/index.html":
-            return self.send_html(HTML_TEMPLATE)
+            rendered = HTML_TEMPLATE.replace("__COLLABORA_WEB_URL__", html.escape(COLLABORA_WEB_URL))
+            return self.send_html(rendered)
 
         if path == "/api/stats":
             conn = get_db(self.db_path)
-            total = conn.execute("SELECT COUNT(*) FROM items WHERE is_dir = 0").fetchone()[0]
-            pending = conn.execute("SELECT COUNT(*) FROM items WHERE triage_status = 'pending' AND is_dir = 0").fetchone()[0]
-            imported = conn.execute("SELECT COUNT(*) FROM items WHERE triage_status = 'imported_collabora'").fetchone()[0]
-            archived = conn.execute("SELECT COUNT(*) FROM items WHERE triage_status = 'archived_nas'").fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM items WHERE is_dir = 0 AND size = -1").fetchone()[0]
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM items WHERE triage_status = 'pending' AND drive_deleted = 0 AND is_dir = 0 AND size = -1"
+            ).fetchone()[0]
+            imported = conn.execute(
+                "SELECT COUNT(*) FROM items WHERE triage_status = 'imported_collabora' AND is_dir = 0 AND size = -1"
+            ).fetchone()[0]
+            archived = conn.execute(
+                "SELECT COUNT(*) FROM items WHERE triage_status = 'archived_nas' AND is_dir = 0 AND size = -1"
+            ).fetchone()[0]
+            deleted = conn.execute(
+                "SELECT COUNT(*) FROM items WHERE (triage_status = 'deleted' OR drive_deleted = 1) AND is_dir = 0 AND size = -1"
+            ).fetchone()[0]
             folders = get_folders_summary(self.db_path)
             return self.send_json({
                 "total": total,
                 "pending": pending,
                 "imported": imported,
                 "archived": archived,
-                "folders": folders
+                "deleted": deleted,
+                "folders": folders,
             })
 
         if path == "/api/items":
@@ -892,18 +1173,19 @@ class TriageHandler(BaseHTTPRequestHandler):
             if not item_id or not action:
                 return self.send_json({"ok": False, "message": "Missing id or action"}, 400)
 
-            if action == "collabora":
-                ok, msg = import_item_to_collabora(item_id, self.db_path)
-            elif action == "nas":
-                ok, msg = archive_item_to_nas(item_id, self.db_path)
-            elif action in ("ignore", "ignored"):
-                ok, msg = update_item_status(item_id, "ignored", self.db_path)
-            elif action == "pending":
-                ok, msg = update_item_status(item_id, "pending", self.db_path)
-            elif action == "delete":
-                ok, msg = update_item_status(item_id, "to_delete", self.db_path)
-            else:
-                ok, msg = False, f"Unknown action: {action}"
+            try:
+                if action == "collabora":
+                    ok, msg = import_item_to_collabora(item_id, self.db_path)
+                elif action == "nas":
+                    ok, msg = archive_item_to_nas(item_id, self.db_path)
+                elif action == "delete":
+                    ok, msg = delete_item_from_gdrive(item_id, self.db_path)
+                elif action == "pending":
+                    ok, msg = update_item_status(item_id, "pending", self.db_path)
+                else:
+                    ok, msg = False, f"Unknown action: {action}"
+            except Exception as exc:
+                ok, msg = False, str(exc)
 
             return self.send_json({"ok": ok, "message": msg})
 
@@ -912,16 +1194,20 @@ class TriageHandler(BaseHTTPRequestHandler):
             if not folder:
                 return self.send_json({"ok": False, "message": "Missing folder"}, 400)
             count = index_folder(folder, self.db_path)
-            return self.send_json({"ok": True, "message": f"Scanned {count} items from Google Drive folder '{folder}'."})
+            return self.send_json({
+                "ok": True,
+                "message": f"Scanned {count} Google-native document(s) from folder '{folder}'.",
+            })
 
         self.send_response(404)
         self.end_headers()
 
 
 def serve(port: int = DEFAULT_PORT, db_path: str = DEFAULT_DB_PATH):
+    get_db(db_path)
     TriageHandler.db_path = db_path
     server = ThreadingHTTPServer(("0.0.0.0", port), TriageHandler)
-    print(f"Google Drive Triage UI serving on http://0.0.0.0:{port} (SQLite DB: {db_path})")
+    print(f"Google Drive Triage UI serving on http://0.0.0.0:{port} (Collabora: {COLLABORA_WEB_URL}, DB: {db_path})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -934,14 +1220,18 @@ def main():
     subparsers = parser.add_subparsers(dest="command")
 
     # index
-    index_parser = subparsers.add_parser("index", help="Index a folder from Google Drive into SQLite")
-    index_parser.add_argument("folder", nargs="?", default="", help="Folder name to index (e.g. 'huis', 'personal')")
+    index_parser = subparsers.add_parser("index", help="Index a folder from Google Drive into SQLite (Google-native docs only)")
+    index_parser.add_argument("folder", nargs="?", default="root", help="Folder name to index (e.g. 'root', 'huis', 'personal')")
     index_parser.add_argument("--depth", type=int, default=4, help="Max depth to recurse")
     index_parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Path to SQLite database")
 
     # index-all
     index_all_parser = subparsers.add_parser("index-all", help="Index all top-level folders into SQLite (excluding backup/Postbox)")
-    index_all_parser.add_argument("--exclude", default="backup,Postbox", help="Comma-separated folder names to exclude")
+    index_all_parser.add_argument(
+        "--exclude",
+        default=",".join(DEFAULT_EXCLUDES),
+        help="Comma-separated folder names to exclude",
+    )
     index_all_parser.add_argument("--depth", type=int, default=4, help="Max depth to recurse")
     index_all_parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Path to SQLite database")
 
@@ -963,9 +1253,12 @@ def main():
         index_all_folders(exclude_folders=excludes, db_path=args.db, max_depth=args.depth)
     elif args.command == "stats":
         folders = get_folders_summary(args.db)
-        print(f"Folders summary in database ({args.db}):")
+        print(f"Google-Native Documents summary in database ({args.db}):")
         for f in folders:
-            print(f"  {f['folder']:<25} Total: {f['total']:<4} Office: {f['office_count']:<3} Pending: {f['pending']:<4} Imported: {f['imported']}")
+            print(
+                f"  {f['folder']:<25} Total: {f['total']:<4} Pending: {f['pending']:<4} "
+                f"In Collabora: {f['imported']:<3} On NAS: {f['archived']:<3} Deleted: {f['deleted']}"
+            )
     elif args.command == "serve":
         serve(port=args.port, db_path=args.db)
     else:
