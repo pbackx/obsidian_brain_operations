@@ -68,6 +68,7 @@ def index():
                            styles=[{"key": s.key, "label": s.label, "emoji": s.emoji}
                                    for s in STYLES.values()],
                            frame_width=pipeline.width, frame_height=pipeline.height,
+                           frame_rotate=pipeline.rotate,
                            default_model=remixer.DEFAULT_MODEL,
                            remix_ready=remixer.configured,
                            switchbot_ready=switchbot() is not None)
@@ -77,7 +78,8 @@ def index():
 def health():
     client = switchbot()
     info = {"ok": True, "remix_ready": remixer.configured, "switchbot_ready": client is not None,
-            "frame": {"width": pipeline.width, "height": pipeline.height},
+            "frame": {"width": pipeline.width, "height": pipeline.height,
+                      "rotate": pipeline.rotate},
             "styles": len(STYLES), "stats": store.stats()}
     if client is not None:
         try:

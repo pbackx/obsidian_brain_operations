@@ -9,7 +9,7 @@
 <body>
 <header>
   <h1>🖼️ ArtFrame Studio</h1>
-  <p class="sub">Photo → AI remix → {{ frame_width }}×{{ frame_height }} E Ink push, without the AI Studio subscription.</p>
+  <p class="sub">Photo → AI remix → {{ frame_width }}×{{ frame_height }} E Ink push, without the AI Studio subscription.{% if frame_rotate and frame_rotate != 'none' %} Panel buffer uploaded rotated {{ frame_rotate|upper }} (frame hung in landscape).{% endif %}</p>
   <p class="badges">
     <span class="badge {{ 'ok' if remix_ready else 'bad' }}">remix {{ 'ready' if remix_ready else 'no API key' }}</span>
     <span class="badge {{ 'ok' if switchbot_ready else 'bad' }}">switchbot {{ 'ready' if switchbot_ready else 'not configured' }}</span>

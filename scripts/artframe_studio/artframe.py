@@ -51,6 +51,13 @@ SWITCHBOT_BASE = os.environ.get("SWITCHBOT_API_BASE", "https://api.switch-bot.co
 FRAME_WIDTH = int(os.environ.get("FRAME_WIDTH", "1200"))
 FRAME_HEIGHT = int(os.environ.get("FRAME_HEIGHT", "1600"))
 
+# The panel buffer is always portrait (480 x 800 on the 7.3" model). When the frame is hung in
+# landscape, the artwork must be pre-rotated: SwitchBot's own app stores landscape compositions
+# rotated 90 degrees clockwise (upload JPEG = 480 x 800). FRAME_ROTATE replays that convention:
+#   none | cw (90 deg clockwise) | ccw (90 deg counter-clockwise)
+ROTATIONS = ("none", "cw", "ccw")
+ROTATE_ENV = os.environ.get("FRAME_ROTATE", "none").strip().lower() or "none"
+
 # Approximate E Ink Spectra 6 primaries (black, white, red, yellow, green, blue).
 # The panel's real primaries are pigment based; these are deliberately saturated so that
 # Floyd-Steinberg dithering lands on the intended ink after the panel renders it.
@@ -198,13 +205,44 @@ def palette_png(path: Path, colours: list[tuple[int, int, int]] = SPECTRA6) -> P
     return path
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
+def rotation_filter(rotate: str) -> str:
+    """ffmpeg filter fragment that maps the composed artwork onto the panel buffer."""
+    rotate = (rotate or "none").lower()
+    if rotate == "cw":
+        return ",transpose=1"
+    if rotate == "ccw":
+        return ",transpose=2"
+    if rotate == "none":
+        return ""
+    raise ValueError(f"unknown rotation: {rotate}")
+
+
 class EinkPipeline:
     """All image manipulation, delegated to the static ffmpeg binary."""
 
-    def __init__(self, width: int = FRAME_WIDTH, height: int = FRAME_HEIGHT,
-                 palette_dir: Path | None = None) -> None:
-        self.width = width
-        self.height = height
+    def __init__(self, width: int | None = None, height: int | None = None,
+                 palette_dir: Path | None = None, rotate: str | None = None) -> None:
+        # Resolved at instantiation (not import) so artframe.env values are honoured.
+        self.width = width if width is not None else _env_int("FRAME_WIDTH", FRAME_WIDTH)
+        self.height = height if height is not None else _env_int("FRAME_HEIGHT", FRAME_HEIGHT)
+        self.rotate = (rotate if rotate is not None
+                       else (os.environ.get("FRAME_ROTATE", ROTATE_ENV).strip().lower() or "none"))
+        if self.rotate not in ROTATIONS:
+            self.rotate = "none"
         self.palette_dir = Path(palette_dir or DATA_DIR)
         self._palette: Path | None = None
         self._lock = threading.Lock()
@@ -244,11 +282,15 @@ class EinkPipeline:
         effective = "floyd_steinberg" if dither == "none" else dither
         dithered = (f"{crop},format=rgb24[bg];[bg][1:v]paletteuse=dither={effective}")
 
+        # The uploaded JPEG is always written in the panel's native portrait buffer, so the
+        # landscape composition is rotated here (never shown rotated in the UI).
+        rot = rotation_filter(self.rotate)
         if quantize_upload:
             _run_ffmpeg(["-i", str(src), "-i", str(self.palette), "-filter_complex",
-                         dithered, "-frames:v", "1", "-q:v", str(quality), str(dest_jpeg)])
+                         f"{dithered}{rot}", "-frames:v", "1", "-q:v", str(quality),
+                         str(dest_jpeg)])
         else:
-            _run_ffmpeg(["-i", str(src), "-vf", crop, "-frames:v", "1",
+            _run_ffmpeg(["-i", str(src), "-vf", f"{crop}{rot}", "-frames:v", "1",
                          "-q:v", str(quality), str(dest_jpeg)])
 
         if eink_preview is not None:
@@ -357,18 +399,55 @@ class SwitchBotClient:
     def status(self, device_id: str | None = None) -> dict[str, Any]:
         return self._request("GET", f"/devices/{device_id or self.device_id}/status")
 
+    def delete_image(self, which: str = "oldest", device_id: str | None = None) -> dict[str, Any]:
+        """Delete one stored artwork (``random`` | ``newest`` | ``oldest``).
+
+        The panel keeps only 10 images (7.3" model, W1130000); once the album is full every
+        ``uploadImage`` fails with ``code=7301 image count limit reached``. The image currently
+        displayed is never deleted, so ``oldest`` is the safe eviction policy.
+        """
+        if which not in ("random", "newest", "oldest"):
+            raise ValueError(f"unknown deleteImage selector: {which}")
+        return self._request("POST", f"/devices/{device_id or self.device_id}/commands",
+                             {"command": "deleteImage", "parameter": which,
+                              "commandType": "command"})
+
     def push_image(self, image: Path | str, device_id: str | None = None,
-                   as_url: bool = False) -> dict[str, Any]:
-        """Upload an image to the frame (newest image becomes the displayed artwork)."""
+                   as_url: bool = False, evict_on_full: bool | None = None,
+                   evict_selector: str | None = None, retries: int = 2) -> dict[str, Any]:
+        """Upload an image to the frame (newest image becomes the displayed artwork).
+
+        When the 10-slot album is full the API rejects the upload; with ``evict_on_full``
+        (env ``ARTFRAME_EVICT_FULL``, default on) the oldest artwork is deleted and the upload
+        is retried, which is what an unattended replacement for AI Studio needs.
+        """
         image = Path(image)
+        if evict_on_full is None:
+            evict_on_full = _env_bool("ARTFRAME_EVICT_FULL", True)
+        selector = evict_selector or _env("ARTFRAME_EVICT_SELECTOR") or "oldest"
         parameter: dict[str, str]
         if as_url:
             parameter = {"imageUrl": str(image)}
         else:
             parameter = {"imageBase64": data_uri(image, "image/jpeg")}
-        return self._request("POST", f"/devices/{device_id or self.device_id}/commands",
-                             {"command": "uploadImage", "parameter": parameter,
-                              "commandType": "command"})
+        payload = {"command": "uploadImage", "parameter": parameter, "commandType": "command"}
+        path = f"/devices/{device_id or self.device_id}/commands"
+
+        evictions: list[dict[str, Any]] = []
+        for attempt in range(max(1, retries + 1)):
+            try:
+                result = self._request("POST", path, payload)
+                if evictions:
+                    result = {**(result or {}), "evictions": evictions}
+                return result
+            except SwitchBotError as exc:
+                full = "7301" in str(exc.payload or exc) or "image count limit" in str(exc).lower()
+                if not (full and evict_on_full and attempt < retries):
+                    raise
+                evicted = self.delete_image(selector, device_id)
+                evictions.append(evicted or {})
+                time.sleep(2)
+        raise SwitchBotError("uploadImage failed after eviction retries")
 
     def command(self, command: str, device_id: str | None = None,
                 parameter: Any = "default") -> dict[str, Any]:

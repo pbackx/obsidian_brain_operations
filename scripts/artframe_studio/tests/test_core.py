@@ -87,7 +87,7 @@ class PaletteAndPipelineTests(unittest.TestCase):
         self.assertEqual(len(SPECTRA6), 6)
 
     def test_frame_output_is_panel_geometry(self):
-        pipe = EinkPipeline(width=150, height=200, palette_dir=self.dir)
+        pipe = EinkPipeline(width=150, height=200, palette_dir=self.dir, rotate="none")
         out = self.dir / "frame.jpg"
         preview = self.dir / "eink.png"
         pipe.to_frame(self.src, out, preview)
@@ -95,15 +95,37 @@ class PaletteAndPipelineTests(unittest.TestCase):
         self.assertEqual(EinkPipeline.probe(preview), {"width": 150, "height": 200})
 
     def test_no_dither_path(self):
-        pipe = EinkPipeline(width=120, height=160, palette_dir=self.dir)
+        pipe = EinkPipeline(width=120, height=160, palette_dir=self.dir, rotate="none")
         out = self.dir / "plain.jpg"
         pipe.to_frame(self.src, out, None, dither="none")
         self.assertEqual(EinkPipeline.probe(out)["height"], 160)
 
     def test_unknown_dither_rejected(self):
-        pipe = EinkPipeline(width=60, height=80, palette_dir=self.dir)
+        pipe = EinkPipeline(width=60, height=80, palette_dir=self.dir, rotate="none")
         with self.assertRaises(ValueError):
             pipe.to_frame(self.src, self.dir / "x.jpg", None, dither="atkinson")
+
+    def test_landscape_rotation_writes_portrait_buffer(self):
+        """A landscape 7.3" composition is uploaded pre-rotated to the 480x800 panel buffer."""
+        pipe = EinkPipeline(width=200, height=120, palette_dir=self.dir, rotate="cw")
+        out = self.dir / "landscape_upload.jpg"
+        preview = self.dir / "landscape_eink.png"
+        pipe.to_frame(self.src, out, preview)
+        self.assertEqual(EinkPipeline.probe(out), {"width": 120, "height": 200})
+        self.assertEqual(EinkPipeline.probe(preview), {"width": 200, "height": 120})
+
+    def test_landscape_rotation_with_quantized_upload(self):
+        pipe = EinkPipeline(width=200, height=120, palette_dir=self.dir, rotate="ccw")
+        out = self.dir / "landscape_quantized.jpg"
+        pipe.to_frame(self.src, out, None, quantize_upload=True)
+        self.assertEqual(EinkPipeline.probe(out), {"width": 120, "height": 200})
+
+    def test_rotation_filter_values(self):
+        self.assertEqual(artframe.rotation_filter("none"), "")
+        self.assertEqual(artframe.rotation_filter("cw"), ",transpose=1")
+        self.assertEqual(artframe.rotation_filter("ccw"), ",transpose=2")
+        with self.assertRaises(ValueError):
+            artframe.rotation_filter("flip")
 
     def test_data_uri(self):
         uri = data_uri(self.src, "image/png")
@@ -150,3 +172,44 @@ class ClientConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class EvictionTests(unittest.TestCase):
+    def test_full_album_evicts_oldest_then_retries(self):
+        from unittest import mock
+
+        client = SwitchBotClient(TOKEN, SECRET, "DEV")
+        calls = []
+
+        def fake_request(method, path, payload=None):
+            calls.append(payload)
+            uploads = [c for c in calls if c["command"] == "uploadImage"]
+            if payload["command"] == "uploadImage" and len(uploads) == 1:
+                raise artframe.SwitchBotError(
+                    "rpc error: code=7301 message=image count limit reached: 10",
+                    190, {"statusCode": 190, "message": "code=7301 image count limit reached"})
+            return {"ok": True}
+
+        with mock.patch.object(client, "_request", side_effect=fake_request), \
+                mock.patch.object(artframe.time, "sleep", lambda *_: None):
+            result = client.push_image(Path(__file__), evict_on_full=True)
+
+        self.assertEqual([c["command"] for c in calls],
+                         ["uploadImage", "deleteImage", "uploadImage"])
+        self.assertEqual(calls[1]["parameter"], "oldest")
+        self.assertTrue(result["ok"])
+
+    def test_full_album_without_eviction_raises(self):
+        from unittest import mock
+
+        client = SwitchBotClient(TOKEN, SECRET, "DEV")
+        with mock.patch.object(client, "_request",
+                               side_effect=artframe.SwitchBotError(
+                                   "code=7301 image count limit reached", 190, {})), \
+                mock.patch.object(artframe.time, "sleep", lambda *_: None):
+            with self.assertRaises(artframe.SwitchBotError):
+                client.push_image(Path(__file__), evict_on_full=False)
+
+    def test_delete_image_validates_selector(self):
+        with self.assertRaises(ValueError):
+            SwitchBotClient(TOKEN, SECRET).delete_image("middle")

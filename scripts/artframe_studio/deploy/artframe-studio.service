@@ -1,0 +1,28 @@
+[Unit]
+Description=ArtFrame Studio - subscription-free SwitchBot AI Art Frame remix service
+Documentation=https://github.com/pbackx/obsidian_brain_operations
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=artframe
+Group=artframe
+WorkingDirectory=/opt/artframe_studio
+EnvironmentFile=/etc/artframe/artframe.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m gunicorn --workers 1 --threads 4 --timeout 300 \
+    --bind 0.0.0.0:8095 --access-logfile - app:app
+Restart=on-failure
+RestartSec=5
+
+# Hardening (the service only needs its data dir, /tmp and outbound HTTPS)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/artframe
+MemoryMax=400M
+
+[Install]
+WantedBy=multi-user.target
