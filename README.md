@@ -354,6 +354,24 @@ On **Google AI Pro**, Antigravity separates model usage into three independent q
 
 ---
 
+## Newsletter Bridge (`scripts/newsletter_tool.py`)
+
+Turns an Obsidian note into an inline-styled responsive HTML e-mail and creates a **draft** campaign at the mailing provider — so newsletters can be written in Markdown and reviewed in the provider dashboard, with no copy-paste into a WYSIWYG editor.
+
+```bash
+# Render a note to a standalone HTML e-mail (preview in a browser)
+python3 scripts/newsletter_tool.py render --file "path/to/note.md" --out /tmp/news.html
+
+# Create a DRAFT campaign (nothing is ever sent). Use --dry-run first.
+NEWSLETTER_TOKEN=... python3 scripts/newsletter_tool.py push \
+  --provider mailerlite --file "path/to/note.md" --subject "December update" \
+  --from-name "Peter" --from-email "news@peated.be" --group 123456789 --dry-run
+```
+
+Supported providers: `mailerlite`, `listmonk`, `buttondown`, `kit`. Obsidian syntax handled: YAML frontmatter (stripped), `[[wikilinks]]`, `![[embeds]]`, `> [!tip]` callouts, GFM tables, nested/task lists, fenced code, `%%comments%%`, `==highlight==`. No third-party rendering dependencies.
+
+---
+
 ## Repository Structure
 
 ```
@@ -369,6 +387,7 @@ brain_operations/
 │   ├── check_models.sh              # Antigravity CLI model entitlement monitor
 │   ├── check_quota.py               # Zero-token quota inspector & automatic model router
 │   ├── freewrite_ingest.py          # Freewrite Postbox (.txt/.md/.docx) -> Vault ingester
+│   ├── newsletter_tool.py           # Obsidian Markdown -> HTML e-mail -> draft campaign
 │   ├── run_nightly.sh               # Master execution & sync runner
 │   └── vault_tool.py                # High-speed Python vault scanner & updater
 ├── templates/
@@ -376,6 +395,7 @@ brain_operations/
 │   ├── Task.md                      # Starter template for 1-file-per-task notes
 │   └── Tasks.base                   # Obsidian 1.14+ Base with Kanban & Table views
 ├── tests/
+│   ├── test_newsletter_tool.py      # Unit tests for the Markdown -> e-mail renderer
 │   └── test_vault_and_freewrite.py  # Unit tests for vault_tool.py and freewrite_ingest.py
 ├── logs/                            # (Ignored) Timestamped execution logs
 ├── README.md                        # Documentation
