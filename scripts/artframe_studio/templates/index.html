@@ -47,7 +47,6 @@
 
     <div class="actions">
       <button id="go" class="primary" disabled>✨ Remix</button>
-      <button id="push" class="ghost" disabled>📤 Push to frame</button>
       <span id="status" class="status"></span>
     </div>
   </section>
@@ -59,9 +58,24 @@
       <button class="tab" data-view="eink">👁️ E Ink simulation</button>
       <button class="tab" data-view="result">🎨 AI remix</button>
       <button class="tab" data-view="source">📷 Source</button>
+      <button id="delete" class="tab danger" title="Delete this generation from the gallery">🗑️ Delete</button>
     </div>
     <img id="view" alt="result preview" hidden>
     <p id="meta" class="status"></p>
+
+    <!-- The push lives here, next to the picture it pushes: it always uploads the generation
+         currently shown above (never "whatever was last remixed"). -->
+    <div class="actions">
+      <button id="push" class="primary" disabled>📤 Push this result to the frame</button>
+      <label class="inline-field">Orientation
+        <select id="orientation">
+          <option value="auto">Panel buffer (verified on the wall)</option>
+          <option value="none">Un-rotated landscape (A/B: upright in the app)</option>
+          <option value="ccw">Rotate CCW instead</option>
+        </select>
+      </label>
+      <span id="pushTarget" class="status">Pick a result to push.</span>
+    </div>
   </section>
 
   <section class="panel gallery">

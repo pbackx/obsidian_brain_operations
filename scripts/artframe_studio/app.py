@@ -169,6 +169,21 @@ def generate():
     return jsonify(payload)
 
 
+@app.delete("/api/gallery/<gen_id>")
+def gallery_delete(gen_id: str):
+    """Delete one generation from the local gallery (row + source/remix/frame/EInk files).
+
+    The frame's 10-slot album is untouched: the SwitchBot API only supports
+    random/newest/oldest album deletion, never "delete this artwork".
+    """
+    row = store.get(gen_id)
+    if row is None:
+        return jsonify({"error": "unknown generation"}), 404
+    removed = store.delete(gen_id)
+    return jsonify({"ok": True, "id": gen_id, "removed_files": [p.name for p in removed],
+                    "remaining": store.stats()["n"]})
+
+
 @app.post("/api/push/<gen_id>")
 def push(gen_id: str):
     row = store.get(gen_id)
@@ -188,13 +203,60 @@ def push(gen_id: str):
                                      "set SWITCHBOT_DEVICE_ID explicitly",
                             "frames": frames}), 409
         client.device_id = frames[0]["deviceId"]
+    # Orientation: "auto" replays the verified panel-buffer rotation (FRAME_ROTATE).
+    # "none" uploads the landscape composition un-rotated, which is the A/B candidate for the
+    # SwitchBot app showing landscape artwork on its side (see README "Orientation").
+    body = request.get_json(silent=True) or {}
+    orientation = str(body.get("orientation") or request.form.get("orientation") or "auto").lower()
+    if orientation not in ("auto", "none", "cw", "ccw"):
+        return jsonify({"error": f"unsupported orientation: {orientation}"}), 400
+    rotate = None if orientation == "auto" else orientation
+
+    frame_path = Path(row["frame_path"])
+    if rotate is not None:
+        variant = FRAME_DIR / f"{gen_id}__{orientation}.jpg"
+        try:
+            pipeline.to_frame(Path(row["result_path"]), variant, None, rotate=rotate)
+        except ImageError as exc:
+            return jsonify({"error": f"frame rendering failed: {exc}"}), 500
+        frame_path = variant
+
     try:
-        result = client.push_image(Path(row["frame_path"]))
+        result = client.push_image(frame_path)
     except SwitchBotError as exc:
         return jsonify({"error": f"SwitchBot: {exc}"}), 502
+    result = {**(result or {}), "orientation": orientation,
+              "uploaded_size": pipeline.probe(frame_path)}
     store.mark_pushed(gen_id, result)
     return jsonify({"ok": True, "device_id": client.device_id, "result": result,
-                    "pushed_at": time.time()})
+                    "orientation": orientation, "pushed_at": time.time()})
+
+
+@app.get("/api/frame/artwork")
+def frame_artwork():
+    """Diagnostics: fetch the artwork the frame currently displays from its cloud URL.
+
+    Reports pixel dimensions and the EXIF orientation tag (if any) so we can compare our own
+    uploads with AI Studio's artwork when debugging how the app rotates landscape images.
+    """
+    client = switchbot()
+    if client is None:
+        return jsonify({"error": "SwitchBot token/secret not configured"}), 503
+    import requests
+    try:
+        status = client.status()
+        url = status.get("imageUrl")
+        if not url:
+            return jsonify({"error": "frame status has no imageUrl"}), 404
+        blob = requests.get(url, timeout=40).content
+    except (SwitchBotError, requests.RequestException) as exc:
+        return jsonify({"error": str(exc)}), 502
+    target = MEDIA_DIR / "frame_artwork.jpg"
+    target.write_bytes(blob)
+    return jsonify({"ok": True, "bytes": len(blob),
+                    "dimensions": pipeline.probe(target),
+                    "exif_orientation": artframe.jpeg_exif_orientation(target),
+                    "url": "/media/frame/frame_artwork.jpg"})
 
 
 @app.get("/api/frames")

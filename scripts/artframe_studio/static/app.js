@@ -4,7 +4,8 @@ const state = { file: null, style: "comic", view: "frame", current: null };
 const $ = (sel) => document.querySelector(sel);
 const drop = $("#drop"), photoInput = $("#photo"), preview = $("#preview"), dropText = $("#dropText");
 const goBtn = $("#go"), pushBtn = $("#push"), statusEl = $("#status"), metaEl = $("#meta");
-const viewEl = $("#view"), historyEl = $("#history");
+const viewEl = $("#view"), historyEl = $("#history"), pushTargetEl = $("#pushTarget");
+const orientationEl = $("#orientation"), deleteBtn = $("#delete");
 
 function setStatus(text, kind = "") {
   statusEl.textContent = text;
@@ -46,23 +47,34 @@ function showView() {
   const url = state.current[`${state.view}_url`];
   viewEl.src = url || "";
   viewEl.hidden = !url;
-  document.querySelectorAll(".tab").forEach((tab) => {
+  document.querySelectorAll(".tab[data-view]").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.view === state.view);
   });
 }
 
-document.querySelectorAll(".tab").forEach((tab) => {
+document.querySelectorAll(".tab[data-view]").forEach((tab) => {
   tab.addEventListener("click", () => { state.view = tab.dataset.view; showView(); });
 });
+
+function describe(item) {
+  const when = new Date(item.created * 1000).toLocaleString();
+  return `${item.style_label} · ${when} · ${item.model} · $${item.cost_usd} · ${item.seconds}s`;
+}
 
 function setCurrent(payload) {
   state.current = payload;
   state.view = "frame";
   showView();
-  metaEl.textContent = payload
-    ? `${payload.style_label} · ${payload.model} · $${payload.cost_usd} · ${payload.seconds}s · ${payload.width}×${payload.height}`
-    : "";
+  const dims = payload && payload.width ? ` · ${payload.width}×${payload.height}` : "";
+  metaEl.textContent = payload ? `${describe(payload)}${dims}` : "";
+  // Push is attached to *this* result panel and always uploads what is displayed above.
   pushBtn.disabled = !(payload && payload.frame_url);
+  deleteBtn.disabled = !payload;
+  pushTargetEl.textContent = payload
+    ? (payload.pushed_at
+        ? `On the frame since ${new Date(payload.pushed_at * 1000).toLocaleTimeString()} — push again to replace it.`
+        : `Will push: ${payload.style_label} (${payload.id}) — exactly what the preview shows.`)
+    : "Pick a result to push.";
   if (payload) loadHistory();
 }
 
@@ -82,7 +94,7 @@ goBtn.addEventListener("click", async () => {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     setCurrent(data);
-    setStatus("Remix ready. Check the E Ink simulation, then push it.", "ok");
+    setStatus("Remix ready. Check the E Ink simulation, then push it from the Result panel.", "ok");
   } catch (err) {
     setStatus(`⚠️ ${err.message}`, "bad");
   } finally {
@@ -92,19 +104,50 @@ goBtn.addEventListener("click", async () => {
 
 pushBtn.addEventListener("click", async () => {
   if (!state.current) return;
+  const orientation = orientationEl.value;
   pushBtn.disabled = true;
-  setStatus("📤 Uploading to the frame…", "busy");
+  setStatus(`📤 Uploading ${state.current.id} to the frame…`, "busy");
   try {
-    const resp = await fetch(`/api/push/${state.current.id}`, { method: "POST" });
+    const resp = await fetch(`/api/push/${state.current.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orientation }),
+    });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-    setStatus(`✅ Pushed to ${data.device_id}. The panel refreshes in ~30 s.`, "ok");
+    const size = data.result?.uploaded_size;
+    const dims = size ? ` (${size.width}×${size.height})` : "";
+    setStatus(`✅ Pushed ${state.current.id} to ${data.device_id}${dims}. The panel refreshes in ~30 s.`, "ok");
     state.current.pushed_at = data.pushed_at;
-    loadHistory();
+    setCurrent(state.current);
   } catch (err) {
     setStatus(`⚠️ ${err.message}`, "bad");
   } finally {
     pushBtn.disabled = false;
+  }
+});
+
+deleteBtn.addEventListener("click", async () => {
+  const item = state.current;
+  if (!item) return;
+  if (!confirm(`Delete ${item.style_label} (${item.id}) from the local gallery?\n\nThis removes the source, remix and E Ink files on the server. The frame keeps showing it.`)) {
+    return;
+  }
+  try {
+    const resp = await fetch(`/api/gallery/${item.id}`, { method: "DELETE" });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    setStatus(`🗑️ Deleted ${item.id} (${data.removed_files.length} files, ${data.remaining} left).`, "ok");
+    state.current = null;
+    viewEl.hidden = true;
+    viewEl.removeAttribute("src");
+    metaEl.textContent = "";
+    pushBtn.disabled = true;
+    deleteBtn.disabled = true;
+    pushTargetEl.textContent = "Pick a result to push.";
+    loadHistory();
+  } catch (err) {
+    setStatus(`⚠️ ${err.message}`, "bad");
   }
 });
 
@@ -113,24 +156,41 @@ async function loadHistory() {
     const resp = await fetch("/api/history?limit=24");
     const items = await resp.json();
     historyEl.replaceChildren(...items.map((item) => {
-      const card = document.createElement("button");
-      card.className = "thumb";
-      card.title = `${item.style_label} · ${new Date(item.created * 1000).toLocaleString()}`;
+      const wrap = document.createElement("div");
+      wrap.className = "thumb";
+      wrap.title = describe(item);
+
       const img = document.createElement("img");
       img.src = item.eink_url || item.frame_url || item.result_url || "";
       img.alt = item.style_label;
       img.loading = "lazy";
-      const pushed = document.createElement("span");
-      pushed.textContent = item.pushed_at ? "✅" : "";
-      card.append(img, pushed);
-      card.addEventListener("click", () => {
-        state.current = item;
-        state.view = "eink";
-        showView();
-        metaEl.textContent = `${item.style_label} · ${item.model} · $${item.cost_usd} · ${item.seconds}s`;
-        pushBtn.disabled = !item.frame_url;
+      img.addEventListener("click", () => setCurrent(item));
+
+      const badge = document.createElement("span");
+      badge.textContent = item.pushed_at ? "✅" : "";
+
+      const del = document.createElement("button");
+      del.className = "thumb-delete";
+      del.type = "button";
+      del.textContent = "🗑";
+      del.title = "Delete from gallery";
+      del.addEventListener("click", async (evt) => {
+        evt.stopPropagation();
+        if (!confirm(`Delete ${item.style_label} (${item.id}) from the gallery?`)) return;
+        const r = await fetch(`/api/gallery/${item.id}`, { method: "DELETE" });
+        if (r.ok) {
+          if (state.current && state.current.id === item.id) {
+            state.current = null;
+            viewEl.hidden = true;
+            pushBtn.disabled = true;
+            deleteBtn.disabled = true;
+          }
+          loadHistory();
+        }
       });
-      return card;
+
+      wrap.append(img, badge, del);
+      return wrap;
     }));
   } catch { /* gallery is best-effort */ }
 }

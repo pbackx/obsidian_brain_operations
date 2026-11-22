@@ -8,6 +8,7 @@ import hmac
 import subprocess
 import sys
 import tempfile
+import os
 import unittest
 from pathlib import Path
 
@@ -213,3 +214,89 @@ class EvictionTests(unittest.TestCase):
     def test_delete_image_validates_selector(self):
         with self.assertRaises(ValueError):
             SwitchBotClient(TOKEN, SECRET).delete_image("middle")
+
+
+class StyleStrengthTests(unittest.TestCase):
+    def test_prompts_force_a_medium_change(self):
+        for key, style in artframe.STYLES.items():
+            prompt = build_prompt(key)
+            self.assertIn("Completely repaint", prompt, key)
+            self.assertIn("must NOT look like a photograph", prompt, key)
+            # each preset must carry concrete, medium-specific vocabulary
+            self.assertGreater(len(style.prompt.split()), 25, f"{key} prompt is too thin")
+
+    def test_styles_are_distinct(self):
+        prompts = {build_prompt(key) for key in artframe.STYLES}
+        self.assertEqual(len(prompts), len(artframe.STYLES))
+
+    def test_painterly_styles_keep_their_texture(self):
+        # the old shared suffix flattened everything into flat colour; painters need their medium
+        for key in ("watercolour", "oilpainting", "pencil"):
+            self.assertIn("texture" if key != "pencil" else "paper", build_prompt(key).lower(), key)
+
+
+class PerCallRotationTests(unittest.TestCase):
+    def test_rotate_override_does_not_mutate_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            src = d / "src.png"
+            subprocess.run([artframe.FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi",
+                            "-i", "testsrc2=size=200x120:duration=1", "-frames:v", "1",
+                            str(src)], check=True)
+            pipe = EinkPipeline(width=200, height=120, palette_dir=d, rotate="cw")
+            out = d / "override.jpg"
+            pipe.to_frame(src, out, None, rotate="none")
+            self.assertEqual(EinkPipeline.probe(out), {"width": 200, "height": 120})
+            self.assertEqual(pipe.rotate, "cw")
+            with self.assertRaises(ValueError):
+                pipe.to_frame(src, d / "bad.jpg", None, rotate="flip")
+
+
+class JpegExifTests(unittest.TestCase):
+    def test_orientation_is_none_without_exif(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            img = d / "plain.jpg"
+            subprocess.run([artframe.FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi",
+                            "-i", "testsrc2=size=64x48:duration=1", "-frames:v", "1",
+                            str(img)], check=True)
+            self.assertIsNone(artframe.jpeg_exif_orientation(img))
+            self.assertIsNone(artframe.jpeg_exif_orientation(Path(__file__)))
+
+    def test_orientation_is_read_from_app1_segment(self):
+        # Minimal EXIF APP1 with a single Orientation (=8) entry, big-endian TIFF.
+        tiff = (b"MM\x00\x2a" + (8).to_bytes(4, "big") + (1).to_bytes(2, "big")
+                + (0x0112).to_bytes(2, "big") + (3).to_bytes(2, "big")
+                + (1).to_bytes(4, "big") + (8).to_bytes(2, "big") + b"\x00\x00"
+                + (0).to_bytes(4, "big"))
+        payload = b"Exif\x00\x00" + tiff
+        seg = b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload
+        jpeg = b"\xff\xd8" + seg + b"\xff\xda\x00\x02\xff\xd9"
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "exif.jpg"
+            p.write_bytes(jpeg)
+            self.assertEqual(artframe.jpeg_exif_orientation(p), 8)
+
+
+class GalleryDeleteTests(unittest.TestCase):
+    def test_delete_removes_row_and_media_but_not_outside_media_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "media"
+            media.mkdir()
+            inside = media / "keep.jpg"
+            inside.write_bytes(b"x")
+            outside = Path(tmp) / "precious.txt"
+            outside.write_text("do not delete")
+            os.environ["ARTFRAME_DATA_DIR"] = tmp
+            try:
+                store = Store(Path(tmp) / "g.sqlite3")
+                gen_id = store.add(style="manga", model="m", frame_path=str(inside),
+                                   source_path=str(outside))
+                removed = store.delete(gen_id)
+                self.assertEqual([p.name for p in removed], ["keep.jpg"])
+                self.assertIsNone(store.get(gen_id))
+                self.assertFalse(inside.exists())
+                self.assertTrue(outside.exists(), "files outside the media tree must survive")
+                self.assertEqual(store.delete(gen_id), [])
+            finally:
+                os.environ.pop("ARTFRAME_DATA_DIR", None)

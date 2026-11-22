@@ -111,64 +111,95 @@ class Style:
     prompt: str
 
 
+# Prompt design notes (2026-11-22 follow-up): the image model defaults to "pretty photo with a
+# filter" when the medium is only named once in passing, which is why watercolour / oil / pencil
+# felt like the style did nothing. Each preset below therefore (a) starts with an imperative that
+# forces a *medium change*, (b) lists concrete technique + material anchors, and (c) names the
+# tools/artists the model knows well. The shared suffix no longer flattens every style into the
+# same poster look (it used to demand flat colour for painters too).
 STYLES: dict[str, Style] = {
     s.key: s
     for s in [
         Style("comic", "Comic Book", "💥",
-              "bold comic-book illustration with thick black ink outlines, flat cel shading, "
-              "halftone dot texture and dramatic action-panel lighting"),
+              "a hand-inked American comic-book panel: heavy black brush outlines around every "
+              "shape, flat cel-shaded colour fills with hard-edged shadow shapes, visible "
+              "halftone/Ben-Day dot texture in the tints, radial speed lines and a dramatic "
+              "low-angle action-panel composition (Jack Kirby / Mike Mignola energy)"),
         Style("pointillism", "Pointillism", "🔵",
-              "neo-impressionist pointillist painting made of clearly visible dots of pure pigment, "
-              "Seurat style, luminous colour mixing, soft edges"),
+              "a Neo-Impressionist pointillist canvas built ONLY from thousands of separate "
+              "small round dabs of unmixed pigment (Seurat / Signac): no smooth blending, no "
+              "continuous brush strokes, optically mixed complementary colour dots, a "
+              "pointillist dotted border-fringe, canvas weave visible"),
         Style("manga", "Manga", "🈶",
-              "black-and-white Japanese manga panel, clean confident line art, screentone shading, "
-              "expressive inking, high contrast, no speech bubbles"),
+              "a black-and-white Japanese manga page panel drawn with a G-pen: crisp varying "
+              "line weight, solid black shadow shapes, screentone dot patterns on clothes and "
+              "backgrounds, white paper with no colour at all, no speech bubbles"),
         Style("cyberpunk", "Cyberpunk", "🌃",
-              "gritty cyberpunk graphic-novel art, neon rim light, synthwave magenta and cyan accents, "
-              "heavy black shadows, futuristic haze"),
+              "a gritty cyberpunk graphic-novel cover: night scene lit only by neon signage, "
+              "hot magenta and cyan rim light on every silhouette, wet reflective ground, "
+              "heavy black ink shadows, glowing rain, brutalist megacity backdrop "
+              "(Ghost in the Shell / Blade Runner poster art)"),
         Style("watercolour", "Watercolour", "🎨",
-              "loose expressive watercolour painting, wet-on-wet bleeding, visible paper grain, "
-              "soft transparent washes, delicate ink accents"),
+              "a real watercolour painting on cold-pressed cotton paper: transparent washes "
+              "that visibly bleed into each other, wet-on-wet blooms with darker pigment "
+              "pooling at the edges, unpainted white paper showing through as highlights, "
+              "soft lost-and-found edges, visible paper grain and a few loose dry-brush "
+              "accents — the photo must look painted, not photographed"),
         Style("oilpainting", "Oil Painting", "🖌️",
-              "classical oil painting with visible impasto brush strokes, rich chiaroscuro, "
-              "museum-quality lighting, thick varnish glow"),
+              "a museum oil painting on canvas: thick impasto brush strokes with visible "
+              "bristle ridges, palette-knife scrapes, warm varnish glaze, dramatic chiaroscuro "
+              "lighting with deep umber shadows and golden highlights (Rembrandt / "
+              "Van Gogh brushwork), canvas weave texture visible"),
         Style("popart", "Pop Art", "🟡",
-              "1960s pop-art screenprint, flat bold blocks of primary colour, Ben-Day dots, "
-              "Warhol/Lichtenstein energy, graphic black keyline"),
+              "a 1960s silkscreen pop-art print: only flat, unshaded blocks of primary colour "
+              "(magenta, cyan, yellow, black) separated by hard black keylines, oversized "
+              "Ben-Day dots, slight screenprint misregistration, Warhol/Lichtenstein poster look"),
         Style("ukiyoe", "Ukiyo-e", "🌊",
-              "traditional Japanese ukiyo-e woodblock print, flat colour planes, "
-              "crisp keyblock outlines, Hokusai wave motifs, washi paper texture"),
+              "a traditional Japanese ukiyo-e woodblock print: flat unshaded colour planes "
+              "printed inside a bold black keyblock outline, Prussian-blue bokashi gradient in "
+              "the sky, stylised Hokusai-style waves and cloud bands, visible washi paper fibre "
+              "and carved woodgrain texture, red artist seal in a corner"),
         Style("pencil", "Pencil Sketch", "✏️",
-              "detailed graphite pencil sketch on textured paper, cross-hatching, "
-              "soft smudged shading, monochrome"),
+              "a graphite pencil drawing in an artist's sketchbook: strictly monochrome grey "
+              "tones, dense cross-hatching and directional pencil strokes for every shadow, "
+              "visible graphite sheen and smudging, rough tooth of the drawing paper, "
+              "unfinished sketchy edges — absolutely no colour and no photographic shading"),
         Style("stainedglass", "Stained Glass", "🪟",
-              "leaded stained-glass window, bold black came lines, jewel-toned translucent panes, "
-              "glowing backlight"),
+              "a leaded stained-glass window lit from behind: black lead came lines enclosing "
+              "jewel-toned translucent glass panes (ruby, cobalt, emerald, amber), internal "
+              "glass striations and bubbles, glowing light bleeding through the panes, "
+              "gothic tracery border"),
         Style("lowpoly", "Low Poly", "🔺",
-              "flat low-poly vector illustration, faceted geometric planes of solid colour, "
-              "minimal gradients, crisp silhouettes"),
+              "a flat low-poly vector illustration: the scene rebuilt as large sharp triangular "
+              "facets of solid colour, hard geometric edges, no outlines, no texture, subtle "
+              "per-facet tonal steps, minimal background, dribbble-style poster art"),
         Style("artdeco", "Art Deco", "🗿",
-              "Art Deco poster illustration, geometric gold and emerald shapes, "
-              "symmetrical ornamental framing, 1920s travel-poster elegance"),
+              "a 1920s Art Deco travel poster: perfectly symmetrical ornamental frame, "
+              "stepped geometric sunburst shapes, gold, emerald and charcoal palette, "
+              "streamlined stylised silhouettes, engraved metallic linework, "
+              "Cassandre-style poster composition"),
     ]
 }
 
-# Every remix prompt ends with these constraints: keep the photo recognisable, and keep the
-# result printable on a six-ink e-paper panel.
+# Shared constraints. Two jobs: keep the photo recognisable, and keep the result printable on a
+# six-ink e-paper panel. Wording is deliberately blunt because the image model otherwise returns
+# something photorealistic that "the style did nothing" to.
 PROMPT_SUFFIX = (
-    " Keep the exact composition, framing, perspective and recognisable subjects of the source "
-    "photo. Redraw it in the requested style. Use a limited palette that reads well on a "
-    "six-colour E Ink Spectra 6 panel (black, white, red, yellow, green, blue): favour large "
-    "flat areas of colour, high contrast and strong silhouettes, avoid tiny detail, soft "
-    "gradients, bokeh and photographic noise. Do not add any text, captions, watermarks or "
-    "borders."
+    " Render the result unmistakably in that medium: it must NOT look like a photograph or a "
+    "photo with a colour filter — no camera bokeh, no lens blur, no photographic skin or fabric "
+    "texture. Keep the composition, framing, perspective and recognisable subjects of the source "
+    "photo, but redraw every pixel by hand in the requested technique. Target a six-colour E Ink "
+    "Spectra 6 panel (black, white, red, yellow, green, blue): bold shapes and strong "
+    "silhouettes, generous areas of each ink, high contrast, no tiny detail, no fine noise. "
+    "Do not add any text, captions, watermarks or borders."
 )
 
 
 def build_prompt(style_key: str, extra: str = "") -> str:
     style = STYLES.get(style_key) or STYLES["comic"]
     extra = (extra or "").strip()
-    prompt = f"Restyle this photo as a {style.prompt}.{PROMPT_SUFFIX}"
+    prompt = (f"Completely repaint this photograph as {style.prompt}. "
+              f"The source photo is only a composition reference.{PROMPT_SUFFIX}")
     if extra:
         prompt += f" Additional art direction from the user: {extra}"
     return prompt
@@ -266,7 +297,7 @@ class EinkPipeline:
 
     def to_frame(self, src: Path, dest_jpeg: Path, eink_preview: Path | None = None,
                  dither: str = "floyd_steinberg", quantize_upload: bool = False,
-                 quality: int = 5) -> Path:
+                 quality: int = 5, rotate: str | None = None) -> Path:
         """Cover-crop to the panel geometry and write the JPEG that gets uploaded.
 
         The panel driver performs its own six-ink quantisation, so by default the uploaded
@@ -282,9 +313,14 @@ class EinkPipeline:
         effective = "floyd_steinberg" if dither == "none" else dither
         dithered = (f"{crop},format=rgb24[bg];[bg][1:v]paletteuse=dither={effective}")
 
-        # The uploaded JPEG is always written in the panel's native portrait buffer, so the
-        # landscape composition is rotated here (never shown rotated in the UI).
-        rot = rotation_filter(self.rotate)
+        # The uploaded JPEG is written in the panel's native portrait buffer, so the landscape
+        # composition is rotated here (never shown rotated in the UI). ``rotate`` overrides the
+        # configured value for a single call, so the UI can A/B an un-rotated landscape upload
+        # without restarting the service.
+        effective_rotate = self.rotate if rotate is None else (rotate or "none").lower()
+        if effective_rotate not in ROTATIONS:
+            raise ValueError(f"unknown rotation: {effective_rotate}")
+        rot = rotation_filter(effective_rotate)
         if quantize_upload:
             _run_ffmpeg(["-i", str(src), "-i", str(self.palette), "-filter_complex",
                          f"{dithered}{rot}", "-frames:v", "1", "-q:v", str(quality),
@@ -314,6 +350,47 @@ class EinkPipeline:
 
 def data_uri(path: Path, mime: str = "image/jpeg") -> str:
     return f"data:{mime};base64,{base64.b64encode(Path(path).read_bytes()).decode()}"
+
+
+def jpeg_exif_orientation(path: Path) -> int | None:
+    """Return the EXIF Orientation tag (1..8) of a JPEG, or None when absent.
+
+    Tiny stdlib-only reader: walk the APP1/Exif segment, parse the TIFF header and look for tag
+    0x0112. Used by ``/api/frame/artwork`` to compare our uploads with AI Studio's artwork.
+    """
+    data = Path(path).read_bytes()
+    if data[:2] != b"\xff\xd8":
+        return None
+    i = 2
+    while i < len(data) - 4:
+        if data[i] != 0xFF:
+            return None
+        marker = data[i + 1]
+        if marker == 0xDA or marker == 0xD9:
+            return None
+        length = int.from_bytes(data[i + 2:i + 4], "big")
+        seg = data[i + 4:i + 2 + length]
+        if marker == 0xE1 and seg[:6] == b"Exif\x00\x00":
+            tiff = seg[6:]
+            if len(tiff) < 8:
+                return None
+            endian = "<" if tiff[:2] == b"II" else ">"
+            offset = int.from_bytes(tiff[4:8], "little" if endian == "<" else "big")
+            if offset + 2 > len(tiff):
+                return None
+            count = int.from_bytes(tiff[offset:offset + 2],
+                                   "little" if endian == "<" else "big")
+            for n in range(count):
+                entry = offset + 2 + n * 12
+                if entry + 12 > len(tiff):
+                    break
+                tag = int.from_bytes(tiff[entry:entry + 2],
+                                     "little" if endian == "<" else "big")
+                if tag == 0x0112:
+                    return int.from_bytes(tiff[entry + 8:entry + 10],
+                                          "little" if endian == "<" else "big")
+        i += 2 + length
+    return None
 
 
 # --------------------------------------------------------------------------------------
@@ -611,6 +688,37 @@ class Store:
                 "SELECT * FROM generations ORDER BY created DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def delete(self, gen_id: str) -> list[Path]:
+        """Remove a generation from the gallery and delete its media files.
+
+        Returns the paths that were unlinked so the caller can report what was cleaned up.
+        The frame's own album is untouched (SwitchBot only supports random/newest/oldest
+        deletion there, never per-image).
+        """
+        row = self.get(gen_id)
+        if row is None:
+            return []
+        removed: list[Path] = []
+        for key in ("source_path", "result_path", "frame_path", "eink_path"):
+            raw = row.get(key)
+            if not raw:
+                continue
+            path = Path(raw)
+            try:
+                path.relative_to(self.media_root())
+            except ValueError:
+                continue  # never unlink outside the media tree
+            if path.is_file():
+                path.unlink(missing_ok=True)
+                removed.append(path)
+        with self._conn() as conn:
+            conn.execute("DELETE FROM generations WHERE id=?", (gen_id,))
+        return removed
+
+    @staticmethod
+    def media_root() -> Path:
+        return Path(os.environ.get("ARTFRAME_DATA_DIR", DATA_DIR)) / "media"
 
     def mark_pushed(self, gen_id: str, result: dict[str, Any]) -> None:
         with self._conn() as conn:

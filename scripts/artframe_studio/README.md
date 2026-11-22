@@ -25,9 +25,9 @@ itself and HA calls it via `rest_command` (see below).
 
 | File | Purpose |
 | --- | --- |
-| `artframe.py` | SwitchBot v1.1 HMAC client, style presets + prompt builder, ffmpeg E Ink pipeline, SQLite gallery |
+| `artframe.py` | SwitchBot v1.1 HMAC client, style presets + prompt builder, ffmpeg E Ink pipeline, SQLite gallery (with delete) |
 | `app.py` | Flask UI/JSON API (Flask Vibe: server-rendered page, vanilla ES modules, no build step) |
-| `templates/index.html`, `static/` | Drag-and-drop UI with "AI remix" vs "E Ink simulation" vs "sent to frame" preview |
+| `templates/index.html`, `static/` | Drag-and-drop UI: remix controls, Result panel (preview + push), gallery with per-item delete |
 | `tests/test_core.py` | Unit tests (signing, prompts, palette, crop, store) |
 
 Only `python3`, `requests`, `flask` and a static `ffmpeg` binary are required — no Pillow, no
@@ -80,6 +80,28 @@ portrait** and the album holds **max 10 images**. SwitchBot's own app stores a l
 composition pre-rotated **90° clockwise**; `FRAME_WIDTH=800 FRAME_HEIGHT=480 FRAME_ROTATE=cw`
 replays exactly that convention (verified by comparing against the artwork the frame was
 already displaying).
+
+### Orientation: why the app shows it sideways (2026-11-22)
+
+The wall is correct, but the phone app renders the same artwork rotated 90° clockwise. Cause:
+the app displays the cloud copy of the **raw panel buffer** (480 × 800, scene pre-rotated CW),
+while the frame firmware rotates that buffer back when it paints the panel — so only the app
+ends up sideways. Verified with `GET /api/frame/artwork`, which downloads the frame's own
+`status.imageUrl`: 480 × 800, **no EXIF orientation tag**, and re-encoded (139 KB upload →
+48 KB), so an EXIF tag cannot survive the round-trip and is not the lever.
+
+Levers, in order of preference:
+
+1. **A/B an un-rotated landscape upload.** `POST /api/push/<gen_id>` accepts
+   `{"orientation": "auto"|"none"|"cw"|"ccw"}`; the UI exposes it as *Orientation* next to the
+   push button. `none` uploads the 800 × 480 composition untouched, which is what a correctly
+   rendered AI Studio landscape artwork would look like in the app. If the firmware
+   auto-rotates aspect-mismatched buffers, both the wall and the app are then correct.
+2. Keep `auto` (panel buffer) and simply ignore the app preview.
+3. Change `FRAME_ROTATE` in `/etc/artframe/artframe.env` if the wall itself ever flips.
+
+Never change the rotation for both at once: the wall has been verified with the CW panel
+buffer, so any experiment must be a per-push override.
 
 ## Home Assistant integration
 
