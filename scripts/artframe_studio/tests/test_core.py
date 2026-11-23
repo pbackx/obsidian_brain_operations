@@ -121,6 +121,31 @@ class PaletteAndPipelineTests(unittest.TestCase):
         pipe.to_frame(self.src, out, None, quantize_upload=True)
         self.assertEqual(EinkPipeline.probe(out), {"width": 120, "height": 200})
 
+    def test_panel_buffer_rotates_only_the_upload(self):
+        """The stored preview stays upright landscape; rotation happens on the pushed copy."""
+        pipe = EinkPipeline(width=200, height=120, palette_dir=self.dir, rotate="none")
+        composition = self.dir / "composition.jpg"
+        pipe.to_frame(self.src, composition, None)
+        self.assertEqual(EinkPipeline.probe(composition), {"width": 200, "height": 120})
+        upload = self.dir / "composition_upload_cw.jpg"
+        self.assertEqual(pipe.panel_buffer(composition, upload, "cw"), upload)
+        self.assertEqual(EinkPipeline.probe(upload), {"width": 120, "height": 200})
+        self.assertEqual(EinkPipeline.probe(composition), {"width": 200, "height": 120})
+
+    def test_panel_buffer_without_rotation_is_a_noop(self):
+        pipe = EinkPipeline(width=200, height=120, palette_dir=self.dir)
+        composition = self.dir / "composition_none.jpg"
+        pipe.to_frame(self.src, composition, None)
+        unused = self.dir / "never_written.jpg"
+        self.assertEqual(pipe.panel_buffer(composition, unused, "none"), composition)
+        self.assertFalse(unused.exists())
+        self.assertEqual(EinkPipeline.probe(composition), {"width": 200, "height": 120})
+
+    def test_shipped_env_defaults_to_unrotated_uploads(self):
+        example = Path(artframe.__file__).parent / "artframe.env.example"
+        self.assertIn("FRAME_ROTATE=none", example.read_text())
+        self.assertIn(artframe.ROTATE_ENV, artframe.ROTATIONS)
+
     def test_rotation_filter_values(self):
         self.assertEqual(artframe.rotation_filter("none"), "")
         self.assertEqual(artframe.rotation_filter("cw"), ",transpose=1")
@@ -147,6 +172,30 @@ class StoreTests(unittest.TestCase):
             self.assertIsNotNone(store.get(gen_id)["pushed_at"])
             self.assertEqual(store.stats()["n"], 1)
             self.assertEqual(len(store.recent()), 1)
+
+    def test_delete_removes_rotated_upload_variants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            saved = os.environ.get("ARTFRAME_DATA_DIR")
+            os.environ["ARTFRAME_DATA_DIR"] = tmp
+            try:
+                frame_dir = Path(tmp) / "media" / "frame"
+                frame_dir.mkdir(parents=True)
+                composition = frame_dir / "abc123.jpg"
+                composition.write_bytes(b"jpeg")
+                variant = frame_dir / "abc123__upload_cw.jpg"
+                variant.write_bytes(b"jpeg")
+                store = Store(Path(tmp) / "g.sqlite3")
+                store.add(id="abc123", style="comic", model="m",
+                          frame_path=str(composition))
+                removed = sorted(p.name for p in store.delete("abc123"))
+                self.assertEqual(removed, ["abc123.jpg", "abc123__upload_cw.jpg"])
+                self.assertFalse(variant.exists())
+                self.assertEqual(store.stats()["n"], 0)
+            finally:
+                if saved is None:
+                    os.environ.pop("ARTFRAME_DATA_DIR", None)
+                else:
+                    os.environ["ARTFRAME_DATA_DIR"] = saved
 
 
 class ClientConfigTests(unittest.TestCase):

@@ -45,6 +45,45 @@ def switchbot() -> SwitchBotClient | None:
     return SwitchBotClient.from_env()
 
 
+def migrate_rotated_previews() -> int:
+    """Re-compose gallery previews that were stored as rotated panel buffers.
+
+    Until 2026-11-22 the ``frame_path`` column held the JPEG that was uploaded, i.e. the
+    480 x 800 panel buffer with the scene pre-rotated 90 deg CW. That is why the Studio's own
+    "Sent to frame" tab showed landscape artwork sideways. ``frame_path`` now always holds the
+    upright landscape composition; this one-off pass rebuilds the old rows from their remix.
+    """
+    if pipeline.width <= pipeline.height:
+        return 0
+    fixed = 0
+    for row in store.recent(500):
+        frame, result = row.get("frame_path"), row.get("result_path")
+        if not frame or not result or not Path(result).is_file():
+            continue
+        try:
+            dims = pipeline.probe(Path(frame)) if Path(frame).is_file() else {}
+        except (ImageError, OSError):
+            continue
+        if (dims.get("width") or 0) >= (dims.get("height") or 0):
+            continue  # already landscape (or unreadable and skipped above)
+        try:
+            pipeline.to_frame(Path(result), Path(frame), None, rotate="none",
+                              quantize_upload=bool(row.get("quantized")))
+            fixed += 1
+        except (ImageError, OSError) as exc:  # pragma: no cover - best effort
+            app.logger.warning("could not rebuild frame preview for %s: %s", row["id"], exc)
+    return fixed
+
+
+# One-off repair for galleries populated before 2026-11-23 (frame previews were stored as the
+# rotated panel buffer, which made landscape artwork look sideways inside the Studio itself).
+try:
+    MIGRATED_PREVIEWS = migrate_rotated_previews()
+except Exception as _exc:  # pragma: no cover - never block startup on a cosmetic migration
+    MIGRATED_PREVIEWS = 0
+    print(f"artframe: frame-preview migration skipped ({_exc})")
+
+
 def _public(row: dict) -> dict:
     return {
         "id": row["id"],
@@ -79,7 +118,8 @@ def health():
     client = switchbot()
     info = {"ok": True, "remix_ready": remixer.configured, "switchbot_ready": client is not None,
             "frame": {"width": pipeline.width, "height": pipeline.height,
-                      "rotate": pipeline.rotate},
+                      "rotate": pipeline.rotate,
+                      "default_orientation": pipeline.rotate},
             "styles": len(STYLES), "stats": store.stats()}
     if client is not None:
         try:
@@ -149,8 +189,10 @@ def generate():
     frame_path = FRAME_DIR / f"{gen_id}.jpg"
     eink_path = EINK_DIR / f"{gen_id}.png"
     try:
+        # rotate="none": the gallery always stores the upright landscape composition. Any
+        # panel-buffer rotation is applied per push (see ``push`` / ``EinkPipeline.panel_buffer``).
         pipeline.to_frame(result_path, frame_path, eink_path, dither=dither,
-                          quantize_upload=quantize)
+                          quantize_upload=quantize, rotate="none")
         dims = pipeline.probe(frame_path)
     except ImageError as exc:
         return jsonify({"error": f"frame rendering failed: {exc}"}), 500
@@ -203,30 +245,29 @@ def push(gen_id: str):
                                      "set SWITCHBOT_DEVICE_ID explicitly",
                             "frames": frames}), 409
         client.device_id = frames[0]["deviceId"]
-    # Orientation: "auto" replays the verified panel-buffer rotation (FRAME_ROTATE).
-    # "none" uploads the landscape composition un-rotated, which is the A/B candidate for the
-    # SwitchBot app showing landscape artwork on its side (see README "Orientation").
+    # Orientation: "auto" uses the server default (FRAME_ROTATE, now "none" = the verified
+    # un-rotated landscape upload). "cw" / "ccw" reproduce the legacy panel buffer for A/B.
     body = request.get_json(silent=True) or {}
     orientation = str(body.get("orientation") or request.form.get("orientation") or "auto").lower()
     if orientation not in ("auto", "none", "cw", "ccw"):
         return jsonify({"error": f"unsupported orientation: {orientation}"}), 400
-    rotate = None if orientation == "auto" else orientation
+    rotate = pipeline.rotate if orientation == "auto" else orientation
 
-    frame_path = Path(row["frame_path"])
-    if rotate is not None:
-        variant = FRAME_DIR / f"{gen_id}__{orientation}.jpg"
+    composition = Path(row["frame_path"])
+    upload_path = composition
+    if rotate not in ("none", ""):
+        upload_path = FRAME_DIR / f"{gen_id}__upload_{rotate}.jpg"
         try:
-            pipeline.to_frame(Path(row["result_path"]), variant, None, rotate=rotate)
-        except ImageError as exc:
+            pipeline.panel_buffer(composition, upload_path, rotate)
+        except (ImageError, OSError) as exc:
             return jsonify({"error": f"frame rendering failed: {exc}"}), 500
-        frame_path = variant
 
     try:
-        result = client.push_image(frame_path)
+        result = client.push_image(upload_path)
     except SwitchBotError as exc:
         return jsonify({"error": f"SwitchBot: {exc}"}), 502
-    result = {**(result or {}), "orientation": orientation,
-              "uploaded_size": pipeline.probe(frame_path)}
+    result = {**(result or {}), "orientation": orientation, "upload_rotate": rotate,
+              "uploaded_size": pipeline.probe(upload_path)}
     store.mark_pushed(gen_id, result)
     return jsonify({"ok": True, "device_id": client.device_id, "result": result,
                     "orientation": orientation, "pushed_at": time.time()})

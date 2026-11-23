@@ -75,33 +75,34 @@ The unit runs `python3 -m gunicorn` (1 worker, 4 threads) with `MemoryMax=400M` 
 
 ## Frame geometry: the 7.3" model hung in landscape
 
-Measured live on the 7.3" panel (model code `W1130000`): the pixel buffer is **480 × 800
-portrait** and the album holds **max 10 images**. SwitchBot's own app stores a landscape
-composition pre-rotated **90° clockwise**; `FRAME_WIDTH=800 FRAME_HEIGHT=480 FRAME_ROTATE=cw`
-replays exactly that convention (verified by comparing against the artwork the frame was
-already displaying).
+Measured live on the 7.3" panel (model code `W1130000`): the pixel buffer is **480 x 800
+portrait** and the album holds **max 10 images**. `FRAME_WIDTH=800 FRAME_HEIGHT=480` describes
+the *composition* as it hangs on the wall; the 7.3" firmware accepts that un-rotated landscape
+JPEG directly, so `FRAME_ROTATE=none` is the default.
 
-### Orientation: why the app shows it sideways (2026-11-22)
+### Orientation: resolved 2026-11-23
 
-The wall is correct, but the phone app renders the same artwork rotated 90° clockwise. Cause:
-the app displays the cloud copy of the **raw panel buffer** (480 × 800, scene pre-rotated CW),
-while the frame firmware rotates that buffer back when it paints the panel — so only the app
-ends up sideways. Verified with `GET /api/frame/artwork`, which downloads the frame's own
-`status.imageUrl`: 480 × 800, **no EXIF orientation tag**, and re-encoded (139 KB upload →
-48 KB), so an EXIF tag cannot survive the round-trip and is not the lever.
+History: SwitchBot's own AI Studio uploads landscape artwork pre-rotated 90 deg clockwise
+(480 x 800), and the first version of this service copied that. The wall looked right, but the
+phone app showed the artwork sideways, because the app renders the **raw cloud copy** of the
+upload (no EXIF tag survives: 480 x 800, re-encoded 139 KB -> 48 KB, measured with
+`GET /api/frame/artwork`).
 
-Levers, in order of preference:
+The A/B push (`orientation: "none"`, an un-rotated 800 x 480 upload) was tested on the real
+panel and reads **upright both on the wall and in the app**, so that is now the default
+(`FRAME_ROTATE=none`). Consequences:
 
-1. **A/B an un-rotated landscape upload.** `POST /api/push/<gen_id>` accepts
-   `{"orientation": "auto"|"none"|"cw"|"ccw"}`; the UI exposes it as *Orientation* next to the
-   push button. `none` uploads the 800 × 480 composition untouched, which is what a correctly
-   rendered AI Studio landscape artwork would look like in the app. If the firmware
-   auto-rotates aspect-mismatched buffers, both the wall and the app are then correct.
-2. Keep `auto` (panel buffer) and simply ignore the app preview.
-3. Change `FRAME_ROTATE` in `/etc/artframe/artframe.env` if the wall itself ever flips.
+* The upload is the composition itself: no rotation, no double resampling.
+* The gallery stores (and the Studio shows) the upright landscape composition only. Any
+  rotation is applied to a throw-away copy at push time (`<id>__upload_<rot>.jpg`), so a
+  sideways preview can no longer appear in the UI.
+* `POST /api/push/<gen_id>` still accepts `{"orientation": "auto"|"none"|"cw"|"ccw"}` for
+  per-push A/B tests; `auto` follows `FRAME_ROTATE`. Only go back to `cw` if a different frame
+  model genuinely needs the legacy pre-rotated buffer.
 
-Never change the rotation for both at once: the wall has been verified with the CW panel
-buffer, so any experiment must be a per-push override.
+The UI now reports push/deletion feedback inside the **Result** panel (where the buttons are)
+instead of the Generate panel, and the *Frame artwork (upright)* tab shows exactly the
+composition that gets pushed.
 
 ## Home Assistant integration
 

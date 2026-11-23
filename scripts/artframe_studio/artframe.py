@@ -51,10 +51,15 @@ SWITCHBOT_BASE = os.environ.get("SWITCHBOT_API_BASE", "https://api.switch-bot.co
 FRAME_WIDTH = int(os.environ.get("FRAME_WIDTH", "1200"))
 FRAME_HEIGHT = int(os.environ.get("FRAME_HEIGHT", "1600"))
 
-# The panel buffer is always portrait (480 x 800 on the 7.3" model). When the frame is hung in
-# landscape, the artwork must be pre-rotated: SwitchBot's own app stores landscape compositions
-# rotated 90 degrees clockwise (upload JPEG = 480 x 800). FRAME_ROTATE replays that convention:
+# The panel buffer is always portrait (480 x 800 on the 7.3" model). Historically landscape
+# artwork had to be uploaded pre-rotated 90 degrees clockwise, because that is what SwitchBot's
+# own AI Studio stores. As of 2026-11-23 the 7.3" firmware also accepts the un-rotated landscape
+# composition (verified on the wall *and* in the phone app, which renders the raw cloud buffer),
+# so ``none`` is the default. FRAME_ROTATE values:
 #   none | cw (90 deg clockwise) | ccw (90 deg counter-clockwise)
+#   auto -> resolves to ``none`` unless FRAME_ROTATE says otherwise
+# The stored gallery/companion artwork is ALWAYS the landscape composition; rotation only ever
+# happens on the JPEG that is uploaded (see EinkPipeline.panel_buffer).
 ROTATIONS = ("none", "cw", "ccw")
 ROTATE_ENV = os.environ.get("FRAME_ROTATE", "none").strip().lower() or "none"
 
@@ -273,7 +278,7 @@ class EinkPipeline:
         self.rotate = (rotate if rotate is not None
                        else (os.environ.get("FRAME_ROTATE", ROTATE_ENV).strip().lower() or "none"))
         if self.rotate not in ROTATIONS:
-            self.rotate = "none"
+            self.rotate = "none"  # unknown / legacy values fall back to the verified default
         self.palette_dir = Path(palette_dir or DATA_DIR)
         self._palette: Path | None = None
         self._lock = threading.Lock()
@@ -334,6 +339,24 @@ class EinkPipeline:
             _run_ffmpeg(["-i", str(src), "-i", str(self.palette), "-filter_complex",
                          dithered, "-frames:v", "1", str(eink_preview)])
         return dest_jpeg
+
+    def panel_buffer(self, composition: Path, dest: Path, rotate: str = "none",
+                     quality: int = 5) -> Path:
+        """Write the exact JPEG handed to ``uploadImage`` for one push.
+
+        The gallery keeps (and the UI shows) the *composition* built by :meth:`to_frame`, which
+        is always upright landscape. Rotating that composition into the portrait panel buffer
+        happens here, at push time, so a sideways preview can never leak into the UI again.
+        Returns ``composition`` untouched when no rotation is requested.
+        """
+        rotate = (rotate or "none").lower()
+        filt = rotation_filter(rotate)
+        if not filt:
+            return composition
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _run_ffmpeg(["-i", str(composition), "-vf", filt.lstrip(","), "-frames:v", "1",
+                     "-q:v", str(quality), str(dest)])
+        return dest
 
     @staticmethod
     def probe(path: Path) -> dict[str, Any]:
@@ -712,6 +735,12 @@ class Store:
             if path.is_file():
                 path.unlink(missing_ok=True)
                 removed.append(path)
+        # Rotated upload variants (``<id>__upload_cw.jpg``) are derived files, not DB columns.
+        frame_dir = self.media_root() / "frame"
+        if frame_dir.is_dir():
+            for variant in frame_dir.glob(f"{gen_id}__*.jpg"):
+                variant.unlink(missing_ok=True)
+                removed.append(variant)
         with self._conn() as conn:
             conn.execute("DELETE FROM generations WHERE id=?", (gen_id,))
         return removed

@@ -9,7 +9,9 @@
 <body>
 <header>
   <h1>🖼️ ArtFrame Studio</h1>
-  <p class="sub">Photo → AI remix → {{ frame_width }}×{{ frame_height }} E Ink push, without the AI Studio subscription.{% if frame_rotate and frame_rotate != 'none' %} Panel buffer uploaded rotated {{ frame_rotate|upper }} (frame hung in landscape).{% endif %}</p>
+  <p class="sub">Photo → AI remix → {{ frame_width }}×{{ frame_height }} E Ink push, without the AI Studio subscription.
+    {% if frame_rotate and frame_rotate != 'none' %}Uploads are rotated {{ frame_rotate|upper }} into the portrait panel buffer.
+    {% else %}Uploads use the un-rotated landscape composition (upright on the wall and in the SwitchBot app).{% endif %}</p>
   <p class="badges">
     <span class="badge {{ 'ok' if remix_ready else 'bad' }}">remix {{ 'ready' if remix_ready else 'no API key' }}</span>
     <span class="badge {{ 'ok' if switchbot_ready else 'bad' }}">switchbot {{ 'ready' if switchbot_ready else 'not configured' }}</span>
@@ -54,7 +56,7 @@
   <section class="panel result">
     <h2>Result</h2>
     <div class="switcher">
-      <button class="tab active" data-view="frame">📤 Sent to frame</button>
+      <button class="tab active" data-view="frame">🖼️ Frame artwork (upright)</button>
       <button class="tab" data-view="eink">👁️ E Ink simulation</button>
       <button class="tab" data-view="result">🎨 AI remix</button>
       <button class="tab" data-view="source">📷 Source</button>
@@ -69,13 +71,15 @@
       <button id="push" class="primary" disabled>📤 Push this result to the frame</button>
       <label class="inline-field">Orientation
         <select id="orientation">
-          <option value="auto">Panel buffer (verified on the wall)</option>
-          <option value="none">Un-rotated landscape (A/B: upright in the app)</option>
-          <option value="ccw">Rotate CCW instead</option>
+          <option value="auto">Default — {{ 'un-rotated landscape' if frame_rotate == 'none' else 'rotate ' ~ frame_rotate|upper }}</option>
+          <option value="cw">Rotate 90° CW (legacy panel buffer)</option>
+          <option value="ccw">Rotate 90° CCW</option>
         </select>
       </label>
       <span id="pushTarget" class="status">Pick a result to push.</span>
     </div>
+    <!-- Push / delete feedback belongs to this panel, next to the button that triggers it. -->
+    <p id="pushStatus" class="status"></p>
   </section>
 
   <section class="panel gallery">

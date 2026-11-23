@@ -5,11 +5,18 @@ const $ = (sel) => document.querySelector(sel);
 const drop = $("#drop"), photoInput = $("#photo"), preview = $("#preview"), dropText = $("#dropText");
 const goBtn = $("#go"), pushBtn = $("#push"), statusEl = $("#status"), metaEl = $("#meta");
 const viewEl = $("#view"), historyEl = $("#history"), pushTargetEl = $("#pushTarget");
-const orientationEl = $("#orientation"), deleteBtn = $("#delete");
+const orientationEl = $("#orientation"), deleteBtn = $("#delete"), pushStatusEl = $("#pushStatus");
 
+// Two independent status lines: #status belongs to the Generate panel (upload/remix),
+// #pushStatus belongs to the Result panel (push progress, push result, deletion).
 function setStatus(text, kind = "") {
   statusEl.textContent = text;
   statusEl.className = `status ${kind}`;
+}
+
+function setPushStatus(text, kind = "") {
+  pushStatusEl.textContent = text;
+  pushStatusEl.className = `status ${kind}`;
 }
 
 function selectStyle(key) {
@@ -75,6 +82,7 @@ function setCurrent(payload) {
         ? `On the frame since ${new Date(payload.pushed_at * 1000).toLocaleTimeString()} — push again to replace it.`
         : `Will push: ${payload.style_label} (${payload.id}) — exactly what the preview shows.`)
     : "Pick a result to push.";
+  if (!payload) setPushStatus("");
   if (payload) loadHistory();
 }
 
@@ -106,7 +114,7 @@ pushBtn.addEventListener("click", async () => {
   if (!state.current) return;
   const orientation = orientationEl.value;
   pushBtn.disabled = true;
-  setStatus(`📤 Uploading ${state.current.id} to the frame…`, "busy");
+  setPushStatus(`📤 Uploading ${state.current.id} to the frame…`, "busy");
   try {
     const resp = await fetch(`/api/push/${state.current.id}`, {
       method: "POST",
@@ -116,12 +124,15 @@ pushBtn.addEventListener("click", async () => {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     const size = data.result?.uploaded_size;
-    const dims = size ? ` (${size.width}×${size.height})` : "";
-    setStatus(`✅ Pushed ${state.current.id} to ${data.device_id}${dims}. The panel refreshes in ~30 s.`, "ok");
+    const dims = size ? ` (${size.width}×${size.height} uploaded)` : "";
+    const how = data.result?.upload_rotate && data.result.upload_rotate !== "none"
+      ? `, rotated ${data.result.upload_rotate.toUpperCase()}` : ", un-rotated";
+    const label = `${state.current.style_label} (${state.current.id})`;
     state.current.pushed_at = data.pushed_at;
-    setCurrent(state.current);
+    setCurrent(state.current);  // refreshes the "on the frame since" line + gallery badges
+    setPushStatus(`✅ ${label} is on ${data.device_id}${dims}${how} — the panel refreshes in ~30 s.`, "ok");
   } catch (err) {
-    setStatus(`⚠️ ${err.message}`, "bad");
+    setPushStatus(`⚠️ ${err.message}`, "bad");
   } finally {
     pushBtn.disabled = false;
   }
@@ -137,7 +148,7 @@ deleteBtn.addEventListener("click", async () => {
     const resp = await fetch(`/api/gallery/${item.id}`, { method: "DELETE" });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-    setStatus(`🗑️ Deleted ${item.id} (${data.removed_files.length} files, ${data.remaining} left).`, "ok");
+    setPushStatus(`🗑️ Deleted ${item.id} (${data.removed_files.length} files, ${data.remaining} left).`, "ok");
     state.current = null;
     viewEl.hidden = true;
     viewEl.removeAttribute("src");
@@ -147,7 +158,7 @@ deleteBtn.addEventListener("click", async () => {
     pushTargetEl.textContent = "Pick a result to push.";
     loadHistory();
   } catch (err) {
-    setStatus(`⚠️ ${err.message}`, "bad");
+    setPushStatus(`⚠️ ${err.message}`, "bad");
   }
 });
 
