@@ -5,7 +5,7 @@ check_quota.py - Antigravity CLI (agy) Live Quota Inspector & Model Router
 Queries live account quota buckets via `agy -p "/usage" --output-format json`
 (zero token consumption), displays per-bucket remaining percentages and local
 reset times, and selects the optimal model for `run_nightly.sh` with automatic
-downgrade/fallback when Gemini 4 Argon quota drops below configured thresholds.
+downgrade/fallback when Gemini Models quota drops below configured thresholds.
 
 Usage:
   ./scripts/check_quota.py                        # Human-readable table + active routing decision
@@ -29,9 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Map model prefixes to the `command.data.groups[].name` returned by `agy -p "/usage"`
 MODEL_GROUP_MAP = {
-    "gemini-4-argon": "Gemini 4 Argon",
-    "gemini-3": "Gemini Models",
-    "gemini-2": "Gemini Models",
+    "gemini-": "Gemini Models",
     "claude-": "Claude and GPT models",
     "gpt-": "Claude and GPT models",
 }
@@ -128,24 +126,27 @@ def parse_groups(usage_payload: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         name = g.get("name", "Unknown")
         buckets_raw = g.get("buckets", [])
         buckets: List[Dict[str, Any]] = []
-        min_pct = 100.0
+        active_pcts: List[float] = []
         weekly_pct: Optional[float] = None
         five_hour_pct: Optional[float] = None
         for b in buckets_raw:
+            is_disabled = bool(b.get("disabled", False))
             frac = float(b.get("remaining_fraction", 0.0))
             pct = round(frac * 100.0, 2)
-            min_pct = min(min_pct, pct)
             window = b.get("window", "")
-            if window == "weekly":
-                weekly_pct = pct
-            elif window == "5h":
-                five_hour_pct = pct
+            if not is_disabled:
+                active_pcts.append(pct)
+                if window == "weekly":
+                    weekly_pct = pct
+                elif window == "5h":
+                    five_hour_pct = pct
             local_str, rel_str = format_reset_time(b.get("reset_time"))
             buckets.append(
                 {
                     "id": b.get("id", ""),
                     "name": b.get("name", ""),
                     "window": window,
+                    "disabled": is_disabled,
                     "remaining_fraction": frac,
                     "remaining_pct": pct,
                     "reset_time_utc": b.get("reset_time"),
@@ -156,7 +157,7 @@ def parse_groups(usage_payload: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         groups[name] = {
             "name": name,
             "description": g.get("description", ""),
-            "effective_remaining_pct": min_pct if buckets else 0.0,
+            "effective_remaining_pct": min(active_pcts) if active_pcts else 0.0,
             "weekly_remaining_pct": weekly_pct,
             "five_hour_remaining_pct": five_hour_pct,
             "buckets": buckets,
@@ -176,86 +177,83 @@ def group_for_model(model_slug: str) -> Optional[str]:
 def select_model(
     groups: Dict[str, Dict[str, Any]],
     primary_model: str,
-    argon_medium_below_pct: float,
-    argon_reserve_pct: float,
+    gemini_stepdown_below_pct: float,
+    gemini_stepdown_model: str,
+    gemini_reserve_pct: float,
     fallback_models: List[str],
     fallback_min_pct: float,
+    excluded: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     """
     Determine which model to run based on live quota buckets and configured thresholds.
     """
+    excluded_set = excluded or set()
     primary_group_name = group_for_model(primary_model)
     primary_group = groups.get(primary_group_name or "", {})
     primary_eff_pct = float(primary_group.get("effective_remaining_pct", 0.0))
+    primary_reserve = gemini_reserve_pct if primary_group_name == "Gemini Models" else fallback_min_pct
 
-    # Case 1: Primary model is Gemini 4 Argon
-    if primary_group_name == "Gemini 4 Argon":
-        if primary_eff_pct >= argon_reserve_pct:
-            if (
-                primary_model == "gemini-4-argon-high"
-                and argon_medium_below_pct > argon_reserve_pct
-                and primary_eff_pct < argon_medium_below_pct
-            ):
-                return {
-                    "selected_model": "gemini-4-argon-medium",
-                    "tier_status": "stepped-down-argon-medium",
-                    "group": primary_group_name,
-                    "effective_remaining_pct": primary_eff_pct,
-                    "reason": (
-                        f"Gemini 4 Argon weekly quota ({primary_eff_pct:.1f}%) is below "
-                        f"ARGON_MEDIUM_BELOW_PCT ({argon_medium_below_pct:.0f}%) but above "
-                        f"ARGON_RESERVE_PCT ({argon_reserve_pct:.0f}%); stepped down to "
-                        f"gemini-4-argon-medium to conserve thinking tokens."
-                    ),
-                }
+    # Case 1: Primary model is allowed and its pool is at or above reserve threshold
+    if primary_model not in excluded_set and primary_eff_pct >= primary_reserve:
+        if (
+            primary_group_name == "Gemini Models"
+            and gemini_stepdown_below_pct > gemini_reserve_pct
+            and primary_eff_pct < gemini_stepdown_below_pct
+            and gemini_stepdown_model
+            and gemini_stepdown_model != primary_model
+            and gemini_stepdown_model not in excluded_set
+        ):
             return {
-                "selected_model": primary_model,
-                "tier_status": "primary",
+                "selected_model": gemini_stepdown_model,
+                "tier_status": "stepped-down-gemini",
                 "group": primary_group_name,
                 "effective_remaining_pct": primary_eff_pct,
                 "reason": (
-                    f"Gemini 4 Argon weekly quota ({primary_eff_pct:.1f}%) is at or above "
-                    f"reserve threshold ({argon_reserve_pct:.0f}%)."
+                    f"Gemini Models effective quota ({primary_eff_pct:.1f}%) is below "
+                    f"GEMINI_STEPDOWN_BELOW_PCT ({gemini_stepdown_below_pct:.0f}%) but above "
+                    f"GEMINI_RESERVE_PCT ({gemini_reserve_pct:.0f}%); stepped down to "
+                    f"'{gemini_stepdown_model}' to conserve quota."
                 ),
             }
-    else:
-        # Non-Argon primary model
-        if primary_eff_pct >= fallback_min_pct:
-            return {
-                "selected_model": primary_model,
-                "tier_status": "primary",
-                "group": primary_group_name,
-                "effective_remaining_pct": primary_eff_pct,
-                "reason": (
-                    f"Primary model '{primary_model}' bucket ({primary_eff_pct:.1f}%) "
-                    f"is above minimum threshold ({fallback_min_pct:.0f}%)."
-                ),
-            }
+        return {
+            "selected_model": primary_model,
+            "tier_status": "primary",
+            "group": primary_group_name,
+            "effective_remaining_pct": primary_eff_pct,
+            "reason": (
+                f"{primary_group_name or 'Primary'} effective quota ({primary_eff_pct:.1f}%) "
+                f"is at or above reserve threshold ({primary_reserve:.0f}%)."
+            ),
+        }
 
-    # Case 2: Primary bucket is below reserve threshold -> walk fallback chain
+    # Case 2: Primary bucket is below reserve threshold (or primary excluded) -> walk fallback chain
     for candidate in fallback_models:
         cand = candidate.strip()
-        if not cand:
+        if not cand or cand in excluded_set:
             continue
         cand_group_name = group_for_model(cand)
         cand_group = groups.get(cand_group_name or "", {})
         cand_eff_pct = float(cand_group.get("effective_remaining_pct", 0.0))
-        threshold = argon_reserve_pct if cand_group_name == "Gemini 4 Argon" else fallback_min_pct
-        if cand_eff_pct >= threshold:
+        if cand_eff_pct >= fallback_min_pct:
+            why_prefix = (
+                f"Primary '{primary_model}' was excluded"
+                if primary_model in excluded_set
+                else f"Primary '{primary_model}' quota ({primary_eff_pct:.1f}%) is below reserve threshold ({primary_reserve:.0f}%)"
+            )
             return {
                 "selected_model": cand,
                 "tier_status": "fallback",
                 "group": cand_group_name,
                 "effective_remaining_pct": cand_eff_pct,
                 "reason": (
-                    f"Primary '{primary_model}' quota ({primary_eff_pct:.1f}%) is below "
-                    f"reserve threshold ({argon_reserve_pct:.0f}%); automatically downgraded "
-                    f"to '{cand}' ({cand_group_name}: {cand_eff_pct:.1f}% remaining)."
+                    f"{why_prefix}; automatically routed to '{cand}' "
+                    f"({cand_group_name}: {cand_eff_pct:.1f}% remaining)."
                 ),
             }
 
     # Ultimate fallback if everything is below threshold
-    last_resort = fallback_models[-1] if fallback_models else primary_model
+    non_excluded_fallbacks = [m for m in fallback_models if m not in excluded_set]
+    last_resort = non_excluded_fallbacks[-1] if non_excluded_fallbacks else primary_model
     return {
         "selected_model": last_resort,
         "tier_status": "exhausted-last-resort",
@@ -290,22 +288,24 @@ def main() -> int:
     base_dir = Path(__file__).resolve().parent.parent
     file_env = load_env_file(base_dir / "config" / "settings.env")
 
-    primary_model = get_setting("PRIMARY_MODEL", "gemini-4-argon-high", file_env)
-    argon_medium_below_pct = float(get_setting("ARGON_MEDIUM_BELOW_PCT", "0", file_env))
-    argon_reserve_pct = float(get_setting("ARGON_RESERVE_PCT", "20", file_env))
+    primary_model = get_setting("PRIMARY_MODEL", "gemini-4-carbon-medium", file_env)
+    legacy_stepdown = get_setting("ARGON_MEDIUM_BELOW_PCT", "0", file_env)
+    gemini_stepdown_below_pct = float(
+        get_setting("GEMINI_STEPDOWN_BELOW_PCT", legacy_stepdown, file_env)
+    )
+    gemini_stepdown_model = get_setting(
+        "GEMINI_STEPDOWN_MODEL", "gemini-4-hydrogen-medium", file_env
+    )
+    legacy_reserve = get_setting("ARGON_RESERVE_PCT", "20", file_env)
+    gemini_reserve_pct = float(get_setting("GEMINI_RESERVE_PCT", legacy_reserve, file_env))
     fallback_min_pct = float(get_setting("FALLBACK_MIN_PCT", "5", file_env))
     fallback_models_str = get_setting(
         "FALLBACK_MODELS",
-        "claude-opus-5-5-high,gemini-3.8-flash-high,claude-sonnet-5-5-high,gemini-3.8-flash-medium",
+        "claude-opus-5-5-high,claude-sonnet-5-5-high,gemini-4-hydrogen-medium,gemini-3.8-flash-medium",
         file_env,
     )
     fallback_models = [m.strip() for m in fallback_models_str.split(",") if m.strip()]
-
     excluded = {m.strip() for m in args.exclude_models.split(",") if m.strip()}
-    if primary_model in excluded and fallback_models:
-        # Force fallback if primary model was excluded
-        argon_reserve_pct = 101.0
-    fallback_models = [m for m in fallback_models if m not in excluded]
 
     try:
         agy_bin = find_agy_binary()
@@ -314,17 +314,19 @@ def main() -> int:
         decision = select_model(
             groups=groups,
             primary_model=primary_model,
-            argon_medium_below_pct=argon_medium_below_pct,
-            argon_reserve_pct=argon_reserve_pct,
+            gemini_stepdown_below_pct=gemini_stepdown_below_pct,
+            gemini_stepdown_model=gemini_stepdown_model,
+            gemini_reserve_pct=gemini_reserve_pct,
             fallback_models=fallback_models,
             fallback_min_pct=fallback_min_pct,
+            excluded=excluded,
         )
     except Exception as exc:
         if args.select_model:
-            # Fail-open to primary or first non-excluded fallback so nightly runs don't crash
+            non_excluded_fallbacks = [m for m in fallback_models if m not in excluded]
             fallback_choice = (
-                fallback_models[0]
-                if (primary_model in excluded and fallback_models)
+                non_excluded_fallbacks[0]
+                if (primary_model in excluded and non_excluded_fallbacks)
                 else primary_model
             )
             print(fallback_choice)
@@ -341,8 +343,9 @@ def main() -> int:
         "checked_at": now_str,
         "config": {
             "primary_model": primary_model,
-            "argon_medium_below_pct": argon_medium_below_pct,
-            "argon_reserve_pct": argon_reserve_pct,
+            "gemini_stepdown_below_pct": gemini_stepdown_below_pct,
+            "gemini_stepdown_model": gemini_stepdown_model,
+            "gemini_reserve_pct": gemini_reserve_pct,
             "fallback_models": fallback_models,
             "fallback_min_pct": fallback_min_pct,
         },
@@ -354,18 +357,26 @@ def main() -> int:
         print(json.dumps(report, indent=2))
         return 0
 
+    ordered_group_names = list(groups.keys())
+
     if args.markdown:
         print(f"### Antigravity Quota Snapshot ({now_str})")
         print("| Quota Group | Bucket | Window | Remaining | Resets At (Local) | In |")
         print("| :--- | :--- | :--- | :--- | :--- | :--- |")
-        for g_name in ["Gemini 4 Argon", "Gemini Models", "Claude and GPT models"]:
-            g = groups.get(g_name)
-            if not g:
-                continue
+        for g_name in ordered_group_names:
+            g = groups[g_name]
             for b in g["buckets"]:
+                if b.get("disabled"):
+                    rem_col = "*disabled*"
+                    reset_col = "—"
+                    in_col = "—"
+                else:
+                    rem_col = f"**{b['remaining_pct']:.1f}%**"
+                    reset_col = b["reset_time_local"]
+                    in_col = b["reset_in"]
                 print(
                     f"| **{g_name}** | {b['name']} (`{b['id']}`) | `{b['window']}` | "
-                    f"**{b['remaining_pct']:.1f}%** | {b['reset_time_local']} | {b['reset_in']} |"
+                    f"{rem_col} | {reset_col} | {in_col} |"
                 )
         print(
             f"\n- **Active Model Selection:** `{decision['selected_model']}` "
@@ -377,21 +388,24 @@ def main() -> int:
     print("=" * 78)
     print(f" Antigravity CLI Quota & Model Router Status ({now_str})")
     print("=" * 78)
-    print(f"{'Quota Group':24s} {'Bucket':28s} {'Rem %':>7s}  {'Resets At (Local)'}")
+    print(f"{'Quota Group':24s} {'Bucket':28s} {'Rem %':>8s}  {'Resets At (Local)'}")
     print("-" * 78)
-    for g_name in ["Gemini 4 Argon", "Gemini Models", "Claude and GPT models"]:
-        g = groups.get(g_name)
-        if not g:
-            continue
+    for g_name in ordered_group_names:
+        g = groups[g_name]
         for b in g["buckets"]:
-            print(
-                f"{g_name:24s} {b['name']:28s} {b['remaining_pct']:6.1f}%  "
-                f"{b['reset_time_local']} ({b['reset_in']})"
-            )
+            if b.get("disabled"):
+                print(f"{g_name:24s} {b['name']:28s} {'disabled':>8s}  —")
+            else:
+                print(
+                    f"{g_name:24s} {b['name']:28s} {b['remaining_pct']:7.1f}%  "
+                    f"{b['reset_time_local']} ({b['reset_in']})"
+                )
     print("-" * 78)
-    print(f" Primary Model:      {primary_model} (Argon Reserve: {argon_reserve_pct:.0f}%)")
-    if argon_medium_below_pct > 0:
-        print(f" Argon Medium Step:  < {argon_medium_below_pct:.0f}% -> gemini-4-argon-medium")
+    print(f" Primary Model:      {primary_model} (Gemini Reserve: {gemini_reserve_pct:.0f}%)")
+    if gemini_stepdown_below_pct > 0:
+        print(
+            f" Gemini Step-Down:   < {gemini_stepdown_below_pct:.0f}% -> {gemini_stepdown_model}"
+        )
     print(f" Fallback Chain:     {', '.join(fallback_models)} (Min: {fallback_min_pct:.0f}%)")
     print(f" Selected Model:     {decision['selected_model']} [{decision['tier_status']}]")
     print(f" Routing Reason:     {decision['reason']}")

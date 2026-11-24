@@ -50,10 +50,11 @@ LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-14}"
 
 # Quota-aware model routing & automatic fallback settings
 QUOTA_AUTO_DOWNGRADE="${QUOTA_AUTO_DOWNGRADE:-true}"
-PRIMARY_MODEL="${PRIMARY_MODEL:-gemini-4-argon-high}"
-ARGON_MEDIUM_BELOW_PCT="${ARGON_MEDIUM_BELOW_PCT:-0}"
-ARGON_RESERVE_PCT="${ARGON_RESERVE_PCT:-20}"
-FALLBACK_MODELS="${FALLBACK_MODELS:-claude-opus-5-5-high,gemini-3.8-flash-high,claude-sonnet-5-5-high,gemini-3.8-flash-medium}"
+PRIMARY_MODEL="${PRIMARY_MODEL:-gemini-4-carbon-medium}"
+GEMINI_STEPDOWN_BELOW_PCT="${GEMINI_STEPDOWN_BELOW_PCT:-${ARGON_MEDIUM_BELOW_PCT:-0}}"
+GEMINI_STEPDOWN_MODEL="${GEMINI_STEPDOWN_MODEL:-gemini-4-hydrogen-medium}"
+GEMINI_RESERVE_PCT="${GEMINI_RESERVE_PCT:-${ARGON_RESERVE_PCT:-20}}"
+FALLBACK_MODELS="${FALLBACK_MODELS:-claude-opus-5-5-high,claude-sonnet-5-5-high,gemini-4-hydrogen-medium,gemini-3.8-flash-medium}"
 FALLBACK_MIN_PCT="${FALLBACK_MIN_PCT:-5}"
 
 # Optional Freewrite Postbox (Google Drive / NAS) ingestion settings
@@ -83,7 +84,7 @@ echo " Default Runner: $AGENT_RUNNER (Pi default model: $PI_MODEL)"
 echo " Max Tasks:     $MAX_TASKS"
 echo " Time Budget:   ${TIMEOUT_SECONDS}s total (default ${TASK_TIMEOUT}s/task, max ${MAX_TASK_TIMEOUT}s/task)"
 echo " Effort:        $EFFORT"
-echo " Auto Fallback: $QUOTA_AUTO_DOWNGRADE (Primary: $PRIMARY_MODEL, Argon Reserve: ${ARGON_RESERVE_PCT}%)"
+echo " Auto Fallback: $QUOTA_AUTO_DOWNGRADE (Primary: $PRIMARY_MODEL, Gemini Reserve: ${GEMINI_RESERVE_PCT}%)"
 echo " Log File:      $LOG_FILE"
 echo "============================================================"
 
@@ -300,7 +301,7 @@ for ((i=1; i<=MAX_TASKS; i++)); do
         if [[ "${QUOTA_AUTO_DOWNGRADE,,}" == "true" && -f "$SCRIPT_DIR/check_quota.py" ]]; then
             SELECTED_MODEL=$(python3 "$SCRIPT_DIR/check_quota.py" --select-model 2>/dev/null || echo "")
             if [[ -n "$SELECTED_MODEL" ]]; then
-                # Model slugs in agy (e.g. gemini-4-argon-high, claude-opus-5-5-high, gemini-3.8-flash-high)
+                # Model slugs in agy (e.g. gemini-4-carbon-medium, claude-opus-5-5-high, gemini-4-hydrogen-medium)
                 # already encode their effort level; passing --model sets both model and effort cleanly.
                 AGY_MODEL_ARGS=(--model "$SELECTED_MODEL")
             fi
